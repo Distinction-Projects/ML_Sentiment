@@ -39,3 +39,6 @@ The server runs at http://localhost:8050 by default. Edit `app.py` to set `debug
 - `data/` contains the default time series sample.
 
 ![dash_app_step03](https://user-images.githubusercontent.com/57110246/236455995-a98416d9-57f3-4c6e-b41b-0583ba66c86d.gif)
+
+
+This is a small change to the readme!
