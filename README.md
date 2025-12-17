@@ -15,8 +15,24 @@ Interactive Plotly Dash application that guides you through SARIMA modeling for 
 ```bash
 git clone <your fork of this repo>
 cd sarima_dashboard
+
+# macOS / Linux (recommended when available)
 python3.11 -m venv .venv
-source .venv/bin/activate  # Windows: .\.venv\Scripts\activate
+source .venv/bin/activate
+
+# Windows (PowerShell) — preferred if you have the Python launcher
+py -3.11 -m venv .venv
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process -Force
+.\.venv\Scripts\Activate.ps1
+
+# Windows (Command Prompt)
+py -3.11 -m venv .venv
+.\.venv\Scripts\activate.bat
+
+# If `py` is not available but `python` points to a suitable interpreter
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1   # PowerShell
+
 pip install --upgrade pip
 pip install -r requirements.txt
 python app.py
