@@ -1,0 +1,23 @@
+name: ml-sentiment
+services:
+  - name: web
+    environment_slug: python
+    instance_size_slug: basic-xxs
+    instance_count: 1
+    http_port: 8080
+    routes:
+      - path: /
+    github:
+      repo: alexstevens/ML_Sentiment
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    build_command: >
+      pip install --upgrade pip &&
+      pip install -r requirements.txt &&
+      python -m nltk.downloader stopwords punkt wordnet vader_lexicon punkt_tab
+    run_command: gunicorn app:server --bind 0.0.0.0:$PORT
+    envs:
+      - key: PYTHON_VERSION
+        value: "3.11"
+        type: GENERAL

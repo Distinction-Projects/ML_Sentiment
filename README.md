@@ -51,8 +51,8 @@ The server runs at http://localhost:8050 by default. Edit `app.py` to set `debug
 - Option B: keep the provided `render.yaml` and let Render auto-detect it as a blueprint.
 
 ## Deploy to DigitalOcean
-- Build command: `pip install -r requirements.txt` (add `python -m nltk.downloader stopwords punkt wordnet vader_lexicon punkt_tab` if you prefer to cache NLTK data during build).
-- Run command: `gunicorn app:server` (the app will also download missing NLTK resources on startup if needed).
+- DigitalOcean App Platform: the included `app.yaml` is a ready-to-deploy spec. Point App Platform at this repo, confirm the detected spec, and deploy. Adjust the repo/branch in the manifest if your fork differs. The spec installs requirements, pre-downloads NLTK data, and starts `gunicorn app:server --bind 0.0.0.0:$PORT` with Python 3.11 on a `basic-xxs` instance.
+- Manual commands (if you prefer to enter them in the UI): build `pip install -r requirements.txt && python -m nltk.downloader stopwords punkt wordnet vader_lexicon punkt_tab`; run `gunicorn app:server`.
 
 ## Project layout
 - `app.py` bootstraps the multi-page Dash app.
