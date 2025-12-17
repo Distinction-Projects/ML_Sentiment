@@ -8,7 +8,7 @@ services:
     routes:
       - path: /
     github:
-      repo: alexstevens/ML_Sentiment
+      repo: Distinction-Projects/ML_Sentiment
       branch: main
       deploy_on_push: true
     source_dir: /
