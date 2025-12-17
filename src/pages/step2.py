@@ -1,3 +1,4 @@
+from pathlib import Path
 import dash
 from dash import html, dcc, callback, Input, Output
 import dash_bootstrap_components as dbc
@@ -8,10 +9,12 @@ from statsmodels.tsa.stattools import adfuller
 
 dash.register_page(__name__, name='2-Stationarity', title='SARIMA | 2-Stationarity')
 
-from assets.fig_layout import my_figlayout, my_linelayout
-from assets.acf_pacf_plots import acf_pacf
+from src.utils.fig_layout import my_figlayout, my_linelayout
+from src.utils.acf_pacf_plots import acf_pacf
 
-_data_airp = pd.read_csv('data/AirPassengers.csv', usecols = [0,1], names=['Time','Values'], skiprows=1)
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+_data_airp = pd.read_csv(DATA_DIR / 'AirPassengers.csv', usecols = [0,1], names=['Time','Values'], skiprows=1)
 _data_airp['Time'] = pd.to_datetime(_data_airp['Time'], errors='raise')
 
 

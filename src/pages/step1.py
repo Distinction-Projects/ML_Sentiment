@@ -1,13 +1,17 @@
+from pathlib import Path
 import dash
 from dash import html, dcc, callback, Input, Output
 import dash_bootstrap_components as dbc
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from ml_sentiment import evaluate_model, preprocess
+from src.ml_sentiment import evaluate_model, preprocess
 dash.register_page(__name__, name='1-Model Evaluation', title='Sentiment Analyzer | Model Evaluation')
+
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
 # Load and preprocess data
-df = pd.read_csv('data/train5.csv')
+df = pd.read_csv(DATA_DIR / 'train5.csv')
 df.columns = ['Sentiment', 'Text', 'Score']
 df['Text'] = df['Text'].astype(str).apply(preprocess)
 X = df['Text'].values

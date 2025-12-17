@@ -3,7 +3,7 @@ from statsmodels.tsa.stattools import acf, pacf
 import numpy as np
 import pandas as pd
 
-from assets.fig_layout import my_figlayout
+from src.utils.fig_layout import my_figlayout
 
 def acf_pacf_plot(_arr, _upper_ci, _lower_ci, is_acf=True):
     fig = go.Figure(layout=my_figlayout)

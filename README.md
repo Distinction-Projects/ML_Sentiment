@@ -14,7 +14,7 @@ Interactive Plotly Dash application that guides you through SARIMA modeling for 
 ## Run locally (Python 3.11)
 ```bash
 git clone <your fork of this repo>
-cd sarima_dashboard
+cd ML_Sentiment
 
 # macOS / Linux (recommended when available)
 python3.11 -m venv .venv
@@ -37,30 +37,35 @@ pip install --upgrade pip
 pip install -r requirements.txt
 # Pre-download NLTK data to speed up first run (optional; auto-downloads on startup if missing)
 python -m nltk.downloader stopwords punkt wordnet vader_lexicon punkt_tab
-python app.py
+python -m src.app
 ```
 
-The server runs at http://localhost:8050 by default. Edit `app.py` to set `debug=True` while developing if you want auto-reload. The `.venv` folder is gitignored; if you use a different env name, add it to `.gitignore` to keep it out of commits.
+The server runs at http://localhost:8050 by default. Edit `src/app.py` to set `debug=True` while developing if you want auto-reload. The `.venv` folder is gitignored; if you use a different env name, add it to `.gitignore` to keep it out of commits.
+
+### Production-style local run
+If you want to mirror the DigitalOcean command locally, run:
+```bash
+gunicorn --chdir src --timeout 600 app:server --bind 0.0.0.0:${PORT:-8050} --worker-tmp-dir ${WORKER_TMP_DIR:-/tmp}
+```
 
 ### Working with data
-- The default AirPassengers sample lives in `data/AirPassengers.csv`. Replace that file (keep the `Time` and `Values` headers) to experiment with your own series.
+- The default AirPassengers sample lives in `src/data/AirPassengers.csv`. Replace that file (keep the `Time` and `Values` headers) to experiment with your own series.
 - Restart the app after swapping data to ensure the in-memory dataset refreshes.
 
-## Deploy to Render
-- Option A: create a new Web Service, point at your repo, set build command `pip install -r requirements.txt`, start command `gunicorn app:server`, and env var `PYTHON_VERSION=3.11`. Render supplies `PORT`; gunicorn will bind to it automatically.
-- Option B: keep the provided `render.yaml` and let Render auto-detect it as a blueprint.
-
 ## Deploy to DigitalOcean
-- DigitalOcean App Platform: the included `app.yaml` is a ready-to-deploy spec. Point App Platform at this repo (`Distinction-Projects/ML_Sentiment`, branch `main`), confirm the detected spec, and deploy. Adjust the repo/branch in the manifest if your fork differs. The spec installs requirements, pre-downloads NLTK data, and starts `gunicorn app:server --bind 0.0.0.0:$PORT --worker-tmp-dir ${WORKER_TMP_DIR:-/tmp}` with Python 3.11 on a `basic-xxs` instance. A `.python-version` file pins Python 3.11 for the DO buildpack. `WORKER_TMP_DIR` defaults to `/dev/shm` (set in `app.yaml`) but the command falls back to `/tmp` if that path is absent (e.g., local macOS test).
-- Manual commands (if you prefer to enter them in the UI): build `pip install -r requirements.txt && python -m nltk.downloader stopwords punkt wordnet vader_lexicon punkt_tab`; run `gunicorn app:server`.
+- DigitalOcean App Platform: the included `app.yaml` is a ready-to-deploy spec. Point App Platform at this repo (`Distinction-Projects/ML_Sentiment`, branch `main`), confirm the detected spec, and deploy. Adjust the repo/branch in the manifest if your fork differs. The spec installs requirements, pre-downloads NLTK data, and starts `gunicorn --chdir src --timeout 600 app:server --bind 0.0.0.0:$PORT --worker-tmp-dir ${WORKER_TMP_DIR:-/tmp}` with Python 3.11 on a `basic-xxs` instance. A `.python-version` file pins Python 3.11 for the DO buildpack. `WORKER_TMP_DIR` defaults to `/dev/shm` (set in `app.yaml`) but the command falls back to `/tmp` if that path is absent (e.g., local macOS test).
+- Manual commands (if you prefer to enter them in the UI): build `pip install -r requirements.txt && python -m nltk.downloader stopwords punkt wordnet vader_lexicon punkt_tab`; run `gunicorn --chdir src --timeout 600 app:server --bind 0.0.0.0:$PORT --worker-tmp-dir ${WORKER_TMP_DIR:-/tmp}`.
 
 ## Project layout
-- `app.py` bootstraps the multi-page Dash app.
-- `pages/` contains the four guided steps described above.
-- `assets/` holds shared components (navigation, footer, styles).
-- `data/` contains the default time series sample.
+```
+src/
+├── app.py               # Dash bootstrap + page/asset config
+├── assets/              # Static assets (CSS, etc.)
+├── components/          # Shared UI elements (nav, footer)
+├── data/                # AirPassengers sample + sentiment training CSV
+├── pages/               # Multi-page Dash views
+└── utils/               # Plot layout helpers, SARIMA utilities
+```
+Each folder is a Python package (via `__init__.py`) so imports stay stable locally and on DigitalOcean.
 
 ![dash_app_step03](https://user-images.githubusercontent.com/57110246/236455995-a98416d9-57f3-4c6e-b41b-0583ba66c86d.gif)
-
-
-This is a small change to the readme!

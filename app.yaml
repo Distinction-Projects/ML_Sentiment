@@ -16,7 +16,7 @@ services:
       pip install --upgrade pip &&
       pip install -r requirements.txt &&
       python -m nltk.downloader stopwords punkt wordnet vader_lexicon punkt_tab
-    run_command: gunicorn app:server --bind 0.0.0.0:$PORT --worker-tmp-dir ${WORKER_TMP_DIR:-/tmp}
+    run_command: gunicorn --chdir src --timeout 600 app:server --bind 0.0.0.0:$PORT --worker-tmp-dir ${WORKER_TMP_DIR:-/tmp}
     envs:
       - key: PYTHON_VERSION
         value: "3.11"
