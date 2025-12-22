@@ -1,17 +1,13 @@
-from pathlib import Path
 import dash
 from dash import html, dcc, callback, Input, Output
 import dash_bootstrap_components as dbc
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from src.ml_sentiment import evaluate_model, preprocess
+from ml_sentiment import evaluate_model, preprocess
 dash.register_page(__name__, name='1-Model Evaluation', title='Sentiment Analyzer | Model Evaluation')
-
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-
 # Load and preprocess data
-df = pd.read_csv(DATA_DIR / 'train5.csv')
+df = pd.read_csv('data/train5.csv')
 df.columns = ['Sentiment', 'Text', 'Score']
 df['Text'] = df['Text'].astype(str).apply(preprocess)
 X = df['Text'].values
@@ -24,31 +20,55 @@ layout = dbc.Container([
     ]),
     # data input
     dbc.Row([
-        dbc.Col([], width = 3),
+        dbc.Col([], width=3),
         dbc.Col([html.P(['Select a model:'], className='par')]),
         dbc.Col([
             dcc.RadioItems(
                 options=[
-                    {'label': 'Naive Bayes', 'value': 'Naive Bayes'},
-                    {'label': 'SVM', 'value': 'SVM'},
-                    {'label': 'VADER', 'value': 'VADER'}
-                ], 
-                value='Naive Bayes', 
-                persistence=True, 
-                persistence_type='session', 
+                    {'label': html.Span('Naive Bayes', style={'margin-right': '30px'}), 'value': 'Naive Bayes'},
+                    {'label': html.Span('SVM', style={'margin-right': '30px'}), 'value': 'SVM'},
+                    {'label': html.Span('VADER', style={'margin-right': '30px'}), 'value': 'VADER'}
+                ],
+                value='Naive Bayes',
+                persistence=True,
+                persistence_type='session',
                 id='radio-dataset',
                 inline=True
             )
         ], width=6),
-        dbc.Col([], width = 1)
+        dbc.Col([], width=1)
     ], className='row-content'),
-    # Accuracy metric
+    # Accuracy, Precision, Recall, F1 metrics
     dbc.Row([
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
-                    html.H6("Accuracy", className="text-muted"),
+                    html.H6("Accuracy", className="accuracy-label"),
                     html.H3(id='accuracy-display', children='0.00%', className='text-primary')
+                ])
+            ], className="text-center")
+        ], width=3, className="mx-auto"),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Precision", className="precision-label"),
+                    html.H3(id='precision-display', children='0.00%', className='text-success')
+                ])
+            ], className="text-center")
+        ], width=3, className="mx-auto"),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Recall", className="recall-label"),
+                    html.H3(id='recall-display', children='0.00%', className='text-warning')
+                ])
+            ], className="text-center")
+        ], width=3, className="mx-auto"),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("F1-Score", className="f1-label"),
+                    html.H3(id='f1-display', children='0.00%', className='text-danger')
                 ])
             ], className="text-center")
         ], width=3, className="mx-auto")
@@ -60,6 +80,15 @@ layout = dbc.Container([
             dcc.Loading(id='p1_1-loading', type='circle', children=dcc.Graph(id='fig-pg1', className='my-graph'))
         ], width = 8),
         dbc.Col([], width = 2)
+    ], className='row-content')
+
+    # Metrics bar chart
+    ,dbc.Row([
+        dbc.Col([], width=2),
+        dbc.Col([
+            dcc.Graph(id='metrics-bar', className='my-graph')
+        ], width=8),
+        dbc.Col([], width=2)
     ], className='row-content')
     
 ])
@@ -87,23 +116,44 @@ def create_confusion_matrix_figure(confusion, labels):
     )
     
     return fig
+# Create bar chart for metrics
+def create_metrics_bar_chart(precision, recall, f1, labels):
+    metrics = ['Precision', 'Recall', 'F1-Score']
+    data = [
+        go.Bar(name=metrics[0], x=labels, y=precision, marker_color='#636EFA'),
+        go.Bar(name=metrics[1], x=labels, y=recall, marker_color='#00CC96'),
+        go.Bar(name=metrics[2], x=labels, y=f1, marker_color='#EF553B')
+    ]
+    fig = go.Figure(data=data)
+    fig.update_layout(
+        barmode='group',
+        title=dict(text="Model Metrics", font=dict(size=18), x=0.5, xanchor='center'),
+        yaxis_title="Score",
+        xaxis_title="Class",
+        template="plotly_dark",
+        height=400,
+        margin=dict(l=50, r=50, t=80, b=50),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    return fig
 # Update fig and accuracy
 @callback(
     Output(component_id='fig-pg1', component_property='figure'),
     Output(component_id='accuracy-display', component_property='children'),
+    Output(component_id='metrics-bar', component_property='figure'),
     Input(component_id='radio-dataset', component_property='value')
 )
 def update_evaluation(model_type):
-    """Run the model evaluation and return the confusion matrix and accuracy."""
+    """Run the model evaluation and return the confusion matrix, accuracy, and metrics bar chart."""
     if model_type == 'VADER':
         # Type 1 is for prebuilt VADER model
         accuracy, precision, recall, confusion, f1 = evaluate_model(X, y, model_type, type=1, k=5)
     else:
         # Type 0 is for custom models
         accuracy, precision, recall, confusion, f1 = evaluate_model(X, y, model_type, type=0, k=5)
-    
+
     labels = ['Negative', 'Neutral', 'Positive']
     fig = create_confusion_matrix_figure(confusion, labels)
     accuracy_text = f"{accuracy:.2%}"
-    
-    return fig, accuracy_text
+    metrics_bar = create_metrics_bar_chart(precision, recall, f1, labels)
+    return fig, accuracy_text, metrics_bar
