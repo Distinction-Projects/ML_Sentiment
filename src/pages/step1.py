@@ -140,6 +140,9 @@ def create_metrics_bar_chart(precision, recall, f1, labels):
 @callback(
     Output(component_id='fig-pg1', component_property='figure'),
     Output(component_id='accuracy-display', component_property='children'),
+    Output(component_id='precision-display', component_property='children'),
+    Output(component_id='recall-display', component_property='children'),
+    Output(component_id='f1-display', component_property='children'),
     Output(component_id='metrics-bar', component_property='figure'),
     Input(component_id='radio-dataset', component_property='value')
 )
@@ -155,5 +158,9 @@ def update_evaluation(model_type):
     labels = ['Negative', 'Neutral', 'Positive']
     fig = create_confusion_matrix_figure(confusion, labels)
     accuracy_text = f"{accuracy:.2%}"
+    # Calculate macro-averaged metrics for display
+    precision_avg = f"{np.mean(precision):.2%}" if hasattr(precision, '__iter__') else f"{precision:.2%}"
+    recall_avg = f"{np.mean(recall):.2%}" if hasattr(recall, '__iter__') else f"{recall:.2%}"
+    f1_avg = f"{np.mean(f1):.2%}" if hasattr(f1, '__iter__') else f"{f1:.2%}"
     metrics_bar = create_metrics_bar_chart(precision, recall, f1, labels)
-    return fig, accuracy_text, metrics_bar
+    return fig, accuracy_text, precision_avg, recall_avg, f1_avg, metrics_bar
