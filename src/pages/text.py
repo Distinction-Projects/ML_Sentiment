@@ -1,5 +1,9 @@
 """
-OPTIMIZED text.py - Pre-trains models at startup for fast predictions
+FIXED VERSION of text.py
+Key fixes:
+1. Added comprehensive error handling
+2. Added data loading validation
+3. Fixed callback to show errors properly
 """
 
 import dash
@@ -7,75 +11,32 @@ from dash import html, dcc, callback, Input, Output, State
 import dash_bootstrap_components as dbc
 import numpy as np
 import pandas as pd
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.naive_bayes import MultinomialNB
-from sklearn.svm import SVC
-from sklearn.linear_model import LinearRegression
+import traceback
 
-from ml_sentiment import preprocess, prebuilt_model
+from ml_sentiment import preprocess, evaluate_model, my_model, prebuilt_model, emotion_score
 
 dash.register_page(__name__, path='/text', name='Test Your Text', title='Sentiment Analyzer | Test Your Text')
 
-# ============================================================
-# PRE-TRAIN MODELS AT STARTUP (runs once when page loads)
-# ============================================================
+# Load and preprocess training data with error handling
 DATA_LOADED = False
 DATA_ERROR = None
-
-# These will hold our pre-trained models
-vectorizer = None
-nb_model = None
-svm_model = None
-score_model = None
-score_vectorizer = None
+X_train = np.array([])
+y_train_sentiment = np.array([])
+y_train_score = np.array([])
 
 try:
-    print("[text.py] Loading training data...")
     train_df = pd.read_csv('data/train5.csv')
     train_df.columns = ['Sentiment', 'Text', 'Score']
     train_df['Text'] = train_df['Text'].astype(str).apply(preprocess)
-    
     X_train = train_df['Text'].values
     y_train_sentiment = train_df['Sentiment'].values
     y_train_score = pd.to_numeric(train_df['Score'], errors='coerce').fillna(0).values
-    
-    print(f"[text.py] Loaded {len(X_train)} samples. Pre-training models...")
-    
-    # Pre-fit the vectorizer ONCE
-    vectorizer = CountVectorizer()
-    X_train_vectorized = vectorizer.fit_transform(X_train)
-    
-    # Pre-train Naive Bayes
-    print("[text.py] Training Naive Bayes...")
-    nb_model = MultinomialNB()
-    nb_model.fit(X_train_vectorized, y_train_sentiment)
-    
-    # Pre-train SVM (this is the slow one!)
-    print("[text.py] Training SVM (this may take a moment)...")
-    svm_model = SVC()
-    svm_model.fit(X_train_vectorized, y_train_sentiment)
-    
-    # Pre-train emotion score model
-    print("[text.py] Training emotion score model...")
-    score_vectorizer = CountVectorizer()
-    X_score_vectorized = score_vectorizer.fit_transform(X_train)
-    score_model = LinearRegression()
-    score_model.fit(X_score_vectorized, y_train_score)
-    
     DATA_LOADED = True
-    print("[text.py] All models pre-trained successfully!")
-    
 except FileNotFoundError:
     DATA_ERROR = "Could not find 'data/train5.csv'. Make sure the file exists."
-    print(f"[text.py] ERROR: {DATA_ERROR}")
 except Exception as e:
     DATA_ERROR = f"{type(e).__name__}: {str(e)}"
-    print(f"[text.py] ERROR: {DATA_ERROR}")
 
-
-# ============================================================
-# LAYOUT
-# ============================================================
 layout = dbc.Container([
     dbc.Row([
         dbc.Col([html.H3('Test Your Own Text')], width=12, className='row-titles')
@@ -86,7 +47,8 @@ layout = dbc.Container([
         dbc.Col([
             dbc.Alert(
                 [html.I(className="fas fa-exclamation-triangle me-2"), DATA_ERROR],
-                color="danger"
+                color="danger",
+                is_open=not DATA_LOADED
             )
         ], width=12)
     ]) if not DATA_LOADED else html.Div(),
@@ -125,9 +87,6 @@ layout = dbc.Container([
 ])
 
 
-# ============================================================
-# CALLBACK - Now just uses pre-trained models (fast!)
-# ============================================================
 @callback(
     Output('analysis-result', 'children'),
     Input('analyze-btn', 'n_clicks'),
@@ -137,10 +96,11 @@ layout = dbc.Container([
 )
 def analyze_text(n_clicks, user_text, model_choice):
     try:
-        # Validate
+        # Validate data is loaded
         if not DATA_LOADED:
             return dbc.Alert(f'Training data not available: {DATA_ERROR}', color='danger')
         
+        # Validate input
         if not user_text or not user_text.strip():
             return dbc.Alert('Please enter some text to analyze.', color='warning')
         
@@ -153,25 +113,16 @@ def analyze_text(n_clicks, user_text, model_choice):
                 color='warning'
             )
         
-        # ---- FAST PREDICTION using pre-trained models ----
+        # Model prediction
         if model_choice == 'VADER':
             pred = prebuilt_model([processed])[0]
             from nltk.sentiment import SentimentIntensityAnalyzer
             analyzer = SentimentIntensityAnalyzer()
             score = analyzer.polarity_scores(processed)['compound']
         else:
-            # Transform input using pre-fitted vectorizer (fast!)
-            X_test_vectorized = vectorizer.transform([processed])
-            
-            # Use pre-trained model (fast!)
-            if model_choice == 'Naive Bayes':
-                pred = nb_model.predict(X_test_vectorized)[0]
-            else:  # SVM
-                pred = svm_model.predict(X_test_vectorized)[0]
-            
-            # Get emotion score using pre-trained model (fast!)
-            X_score_vectorized = score_vectorizer.transform([processed])
-            score = score_model.predict(X_score_vectorized)[0]
+            # For NB/SVM
+            pred = my_model(X_train, y_train_sentiment, [processed], model_choice)[0]
+            score = emotion_score(X_train, y_train_score, [processed])[0]
         
         # Format output
         sentiment_map = {'positive': 'Positive', 'neutral': 'Neutral', 'negative': 'Negative'}
@@ -196,10 +147,18 @@ def analyze_text(n_clicks, user_text, model_choice):
             ])
         ], color=card_color, outline=True, className='text-center')
     
+    except ValueError as e:
+        # This catches the "Unknown model_name" error from my_model
+        return dbc.Alert([
+            html.Strong('Model Error: '),
+            str(e)
+        ], color='danger')
+    
     except Exception as e:
-        import traceback
-        print(f"[text.py] Error in callback: {traceback.format_exc()}")
+        # Catch all other errors
         return dbc.Alert([
             html.Strong(f'Error ({type(e).__name__}): '),
-            str(e)
+            str(e),
+            html.Br(),
+            html.Small('Check the browser console (F12) for more details.')
         ], color='danger')
