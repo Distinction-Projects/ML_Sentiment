@@ -1,30 +1,18 @@
-from pathlib import Path
-
 import dash
 from dash import html
 import dash_bootstrap_components as dbc
 
 dash.register_page(__name__, path='/', name='Home', title='Sentiment Analyzer | Home')
 
-import pandas as pd
 try:
-    from src.ml_sentiment import evaluate_model, preprocess
+    from src.ml_sentiment import load_cached_metrics
 except ModuleNotFoundError:
-    from ml_sentiment import evaluate_model, preprocess
+    from ml_sentiment import load_cached_metrics
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_PATH = BASE_DIR / "data" / "train5.csv"
-
-# Load and preprocess data for accuracy comparison
-df = pd.read_csv(DATA_PATH)
-df.columns = ['Sentiment', 'Text', 'Score']
-df['Text'] = df['Text'].astype(str).apply(preprocess)
-X = df['Text'].values
-y = df['Sentiment'].values
-
-# Evaluate both models
-vader_acc, *_ = evaluate_model(X, y, 'VADER', type=1, k=5)
-nb_acc, *_ = evaluate_model(X, y, 'Naive Bayes', type=0, k=5)
+metrics = load_cached_metrics()
+model_metrics = metrics.get("models", {})
+vader_acc = model_metrics.get("vader", {}).get("accuracy", 0.0)
+nb_acc = model_metrics.get("naive bayes", {}).get("accuracy", 0.0)
 
 # Determine which is best
 if nb_acc > vader_acc:

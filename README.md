@@ -37,7 +37,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 # Pre-download NLTK data to speed up first run (optional; auto-downloads on startup if missing)
 python -m nltk.downloader stopwords punkt wordnet vader_lexicon punkt_tab
-# Pre-build cached models for faster runtime inference (recommended; done during cloud builds)
+# Pre-build cached models and evaluation metrics for faster runtime inference (recommended; done during cloud builds)
 python -m src.cache_models
 python -m src.app
 ```
@@ -46,7 +46,7 @@ The server runs at http://localhost:8050 by default. Edit `src/app.py` to set `d
 
 ### VS Code tasks (macOS/Linux)
 If you use VS Code, there is a simple task setup in `.vscode/tasks.json` to automate the local workflow. The `Setup: Full local` task runs automatically on folder open; remove the `runOptions` block in `.vscode/tasks.json` if you want to opt out.
-- `Setup: Full local` creates the venv, installs requirements, downloads NLTK data, and builds cached models.
+- `Setup: Full local` creates the venv, installs requirements, downloads NLTK data, and builds cached models + metrics.
 - `App: Run (Dash)` starts the server with `python -m src.app`.
 
 Windows users should follow the manual commands above.

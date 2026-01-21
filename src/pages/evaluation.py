@@ -1,26 +1,17 @@
-from pathlib import Path
-
 import dash
 from dash import html, dcc, callback, Input, Output
 import dash_bootstrap_components as dbc
-import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 try:
-    from src.ml_sentiment import evaluate_model, preprocess
+    from src.ml_sentiment import load_cached_metrics
 except ModuleNotFoundError:
-    from ml_sentiment import evaluate_model, preprocess
+    from ml_sentiment import load_cached_metrics
 dash.register_page(__name__, name='1-Model Evaluation', title='Sentiment Analyzer | Model Evaluation')
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_PATH = BASE_DIR / "data" / "train5.csv"
-
-# Load and preprocess data
-df = pd.read_csv(DATA_PATH)
-df.columns = ['Sentiment', 'Text', 'Score']
-df['Text'] = df['Text'].astype(str).apply(preprocess)
-X = df['Text'].values
-y = df['Sentiment'].values
+METRICS_CACHE = load_cached_metrics()
+LABELS = METRICS_CACHE.get("labels", ["negative", "neutral", "positive"])
+LABELS_DISPLAY = [label.title() for label in LABELS]
 ### PAGE LAYOUT ###############################################################################################################
 layout = dbc.Container([
     # title
@@ -145,6 +136,17 @@ def create_metrics_bar_chart(precision, recall, f1, labels):
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     return fig
+
+
+def _model_key(model_type):
+    name = str(model_type).strip().lower()
+    if name in ("naive bayes", "naivebayes", "nb", "multinomialnb"):
+        return "naive bayes"
+    if name in ("svm", "support vector machine", "support-vector-machine"):
+        return "svm"
+    if name == "vader":
+        return "vader"
+    return name
 # Update fig and accuracy
 @callback(
     Output(component_id='fig-pg1', component_property='figure'),
@@ -157,19 +159,25 @@ def create_metrics_bar_chart(precision, recall, f1, labels):
 )
 def update_evaluation(model_type):
     """Run the model evaluation and return the confusion matrix, accuracy, and metrics bar chart."""
-    if model_type == 'VADER':
-        # Type 1 is for prebuilt VADER model
-        accuracy, precision, recall, confusion, f1 = evaluate_model(X, y, model_type, type=1, k=5)
-    else:
-        # Type 0 is for custom models
-        accuracy, precision, recall, confusion, f1 = evaluate_model(X, y, model_type, type=0, k=5)
+    model_key = _model_key(model_type)
+    model_metrics = METRICS_CACHE.get("models", {}).get(model_key)
+    if not model_metrics:
+        empty = np.zeros((len(LABELS_DISPLAY), len(LABELS_DISPLAY)))
+        fig = create_confusion_matrix_figure(empty, LABELS_DISPLAY)
+        metrics_bar = create_metrics_bar_chart([0, 0, 0], [0, 0, 0], [0, 0, 0], LABELS_DISPLAY)
+        return fig, "N/A", "N/A", "N/A", "N/A", metrics_bar
 
-    labels = ['Negative', 'Neutral', 'Positive']
-    fig = create_confusion_matrix_figure(confusion, labels)
+    confusion = np.asarray(model_metrics.get("confusion", []), dtype=float)
+    precision = np.asarray(model_metrics.get("precision", []), dtype=float)
+    recall = np.asarray(model_metrics.get("recall", []), dtype=float)
+    f1 = np.asarray(model_metrics.get("f1", []), dtype=float)
+    accuracy = float(model_metrics.get("accuracy", 0.0))
+
+    fig = create_confusion_matrix_figure(confusion, LABELS_DISPLAY)
     accuracy_text = f"{accuracy:.2%}"
     # Calculate macro-averaged metrics for display
     precision_avg = f"{np.mean(precision):.2%}" if hasattr(precision, '__iter__') else f"{precision:.2%}"
     recall_avg = f"{np.mean(recall):.2%}" if hasattr(recall, '__iter__') else f"{recall:.2%}"
     f1_avg = f"{np.mean(f1):.2%}" if hasattr(f1, '__iter__') else f"{f1:.2%}"
-    metrics_bar = create_metrics_bar_chart(precision, recall, f1, labels)
+    metrics_bar = create_metrics_bar_chart(precision, recall, f1, LABELS_DISPLAY)
     return fig, accuracy_text, precision_avg, recall_avg, f1_avg, metrics_bar

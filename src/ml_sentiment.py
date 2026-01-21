@@ -1,4 +1,5 @@
 import string
+import json
 from pathlib import Path
 
 import numpy as np
@@ -49,7 +50,12 @@ MODEL_PATHS = {
     "svm": MODEL_DIR / "svm.joblib",
 }
 SCORE_MODEL_PATH = MODEL_DIR / "score_regressor.joblib"
+METRICS_PATH = MODEL_DIR / "metrics.json"
 _VADER_ANALYZER = None
+_VECTORIZER_CACHE = None
+_MODEL_CACHE = {}
+_SCORE_MODEL_CACHE = None
+_METRICS_CACHE = None
 
 
 def _normalize_model_name(model_name):
@@ -113,23 +119,30 @@ def train_and_cache_models(data_path=None, force=False):
 
 
 def load_cached_vectorizer(train_if_missing=True, data_path=None):
+    global _VECTORIZER_CACHE
+    if _VECTORIZER_CACHE is not None:
+        return _VECTORIZER_CACHE
     if not VECTORIZER_PATH.exists():
         if train_if_missing:
             train_and_cache_models(data_path=data_path)
         else:
             raise FileNotFoundError(f"Missing cached vectorizer: {VECTORIZER_PATH}")
-    return joblib.load(VECTORIZER_PATH)
+    _VECTORIZER_CACHE = joblib.load(VECTORIZER_PATH)
+    return _VECTORIZER_CACHE
 
 
 def load_cached_model(model_name, train_if_missing=True, data_path=None):
     normalized = _normalize_model_name(model_name)
     model_path = MODEL_PATHS[normalized]
+    if normalized in _MODEL_CACHE:
+        return load_cached_vectorizer(train_if_missing=train_if_missing, data_path=data_path), _MODEL_CACHE[normalized]
     if not model_path.exists():
         if train_if_missing:
             train_and_cache_models(data_path=data_path)
         else:
             raise FileNotFoundError(f"Missing cached model: {model_path}")
     model = joblib.load(model_path)
+    _MODEL_CACHE[normalized] = model
     vectorizer = load_cached_vectorizer(train_if_missing=train_if_missing, data_path=data_path)
     return vectorizer, model
 
@@ -141,12 +154,16 @@ def predict_cached(X_test, model_name, train_if_missing=True, data_path=None):
 
 
 def load_cached_score_model(train_if_missing=True, data_path=None):
+    global _SCORE_MODEL_CACHE
+    if _SCORE_MODEL_CACHE is not None:
+        return load_cached_vectorizer(train_if_missing=train_if_missing, data_path=data_path), _SCORE_MODEL_CACHE
     if not SCORE_MODEL_PATH.exists():
         if train_if_missing:
             train_and_cache_models(data_path=data_path)
         else:
             raise FileNotFoundError(f"Missing cached score model: {SCORE_MODEL_PATH}")
     model = joblib.load(SCORE_MODEL_PATH)
+    _SCORE_MODEL_CACHE = model
     vectorizer = load_cached_vectorizer(train_if_missing=train_if_missing, data_path=data_path)
     return vectorizer, model
 
@@ -155,6 +172,61 @@ def predict_score_cached(X_test, train_if_missing=True, data_path=None):
     vectorizer, model = load_cached_score_model(train_if_missing=train_if_missing, data_path=data_path)
     X_vec = vectorizer.transform(X_test)
     return model.predict(X_vec)
+
+
+def cache_metrics(data_path=None, force=False, k=5):
+    global _METRICS_CACHE
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    data_path = Path(data_path) if data_path else DATA_PATH
+    if not force and METRICS_PATH.exists():
+        _METRICS_CACHE = load_cached_metrics(train_if_missing=False)
+        return
+
+    if not data_path.exists():
+        raise FileNotFoundError(f"Training data not found: {data_path}")
+
+    df = read_file(data_path)
+    df['Text'] = df['Text'].astype(str).apply(preprocess)
+    X = df['Text'].values
+    y = df['Sentiment'].values
+    labels = list(np.unique(y))
+
+    def _metrics_for(model_label, model_type):
+        accuracy, precision, recall, confusion, f1 = evaluate_model(X, y, model_label, type=model_type, k=k)
+        return {
+            "accuracy": float(accuracy),
+            "precision": np.asarray(precision).tolist(),
+            "recall": np.asarray(recall).tolist(),
+            "f1": np.asarray(f1).tolist(),
+            "confusion": np.asarray(confusion).tolist(),
+        }
+
+    payload = {
+        "labels": labels,
+        "models": {
+            "naive bayes": _metrics_for("Naive Bayes", 0),
+            "svm": _metrics_for("SVM", 0),
+            "vader": _metrics_for("VADER", 1),
+        },
+    }
+
+    with open(METRICS_PATH, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    _METRICS_CACHE = payload
+
+
+def load_cached_metrics(train_if_missing=True, data_path=None):
+    global _METRICS_CACHE
+    if _METRICS_CACHE is not None:
+        return _METRICS_CACHE
+    if not METRICS_PATH.exists():
+        if train_if_missing:
+            cache_metrics(data_path=data_path)
+        else:
+            raise FileNotFoundError(f"Missing cached metrics: {METRICS_PATH}")
+    with open(METRICS_PATH, "r", encoding="utf-8") as handle:
+        _METRICS_CACHE = json.load(handle)
+    return _METRICS_CACHE
 
 def emotion_score(X_train, y_train, X_test):
     vector = CountVectorizer()
