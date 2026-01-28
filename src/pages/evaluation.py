@@ -7,7 +7,7 @@ try:
     from src.ml_sentiment import load_cached_metrics
 except ModuleNotFoundError:
     from ml_sentiment import load_cached_metrics
-dash.register_page(__name__, name='1-Model Evaluation', title='Sentiment Analyzer | Model Evaluation')
+dash.register_page(__name__, name='Model Evaluation', title='Sentiment Analyzer | Model Evaluation')
 
 METRICS_CACHE = load_cached_metrics()
 LABELS = METRICS_CACHE.get("labels", ["negative", "neutral", "positive"])
