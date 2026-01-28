@@ -10,7 +10,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-dash.register_page(__name__, name='4-Prediction', title='SARIMA | 4-Prediction')
+#dash.register_page(__name__, name='4-Prediction', title='SARIMA | 4-Prediction')
 
 from src.utils.fig_layout import my_figlayout, train_linelayout, test_linelayout, pred_linelayout
 from src.utils.acf_pacf_plots import acf_pacf
