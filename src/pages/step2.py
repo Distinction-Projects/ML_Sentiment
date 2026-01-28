@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 from statsmodels.tsa.stattools import adfuller
 
-dash.register_page(__name__, name='2-Stationarity', title='SARIMA | 2-Stationarity')
+#dash.register_page(__name__, name='2-Stationarity', title='SARIMA | 2-Stationarity')
 
 from src.utils.fig_layout import my_figlayout, my_linelayout
 from src.utils.acf_pacf_plots import acf_pacf
