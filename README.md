@@ -76,6 +76,7 @@ Available endpoints:
 Dash pages for this data:
 - `/news/digest`: filterable digest view and latest-card view.
 - `/news/stats`: charts/cards for source, tags, score distribution, and daily counts.
+- `/news/integration`: CI-oriented runtime checks for endpoint reachability, payload presence, and freshness state.
 
 Optional query params on digest endpoints:
 - `date=YYYY-MM-DD`

@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask
@@ -9,12 +10,17 @@ from flask import Flask
 from src.api.news_endpoints import register_news_endpoints
 
 
+NOW_UTC = datetime.now(timezone.utc)
+NOW_UTC_ISO = NOW_UTC.isoformat().replace("+00:00", "Z")
+DIGEST_UTC_ISO = (NOW_UTC - timedelta(minutes=3)).isoformat().replace("+00:00", "Z")
+
+
 SAMPLE_PAYLOAD = {
     "schema_version": "1.0",
-    "generated_at": "2026-03-02T20:54:00Z",
+    "generated_at": NOW_UTC_ISO,
     "contract": "rss_pipeline_precomputed",
     "digest": {
-        "generated_at": "2026-03-02T20:51:24Z",
+        "generated_at": DIGEST_UTC_ISO,
         "run_id": "digest-abc123",
     },
     "summary": {"articles": 2, "scored_articles": 2, "high_scoring_articles": 1},
