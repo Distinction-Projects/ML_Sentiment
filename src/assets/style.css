@@ -105,6 +105,20 @@
     color: #adb5bd;
 }
 
+/* List group items on dark pages should blend in */
+.list-group-item {
+    background-color: #404040;
+    color: #e9ecef;
+    border: 1px solid #505050;
+}
+
+.list-group-item a,
+.list-group-item strong,
+.list-group-item span,
+.list-group-item p {
+    color: #e9ecef;
+}
+
 /* Spinner customization */
 .spinner-border {
     width: 3rem;
@@ -116,6 +130,21 @@
     width: 8px;
     height: 8px;
 }
+
+/* Ensure any <pre> blocks are readable on dark cards or backgrounds */
+.card pre,
+.dark-pre {
+    background-color: #404040;
+    color: #e9ecef;
+    padding: 0.75rem;
+    border-radius: 0.25rem;
+    border: 1px solid #505050;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 320px;
+    overflow-y: auto;
+}
+
 
 ::-webkit-scrollbar-track {
     background: #303030;

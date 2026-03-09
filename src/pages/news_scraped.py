@@ -74,16 +74,7 @@ def _article_block(record: dict) -> dbc.Card:
                 ),
                 html.Pre(
                     raw_text,
-                    style={
-                        "maxHeight": "320px",
-                        "overflowY": "auto",
-                        "backgroundColor": "#f8f9fa",
-                        "padding": "0.75rem",
-                        "borderRadius": "0.25rem",
-                        "border": "1px solid #dee2e6",
-                        "whiteSpace": "pre-wrap",
-                        "wordBreak": "break-word",
-                    },
+                    className="dark-pre",
                 ),
             ]
         ),

@@ -70,7 +70,7 @@ layout = dbc.Container(
                 dbc.Col(html.Div(id="news-integration-checks"), lg=7, className="mb-3"),
             ]
         ),
-        dbc.Row([dbc.Col(html.Pre(id="news-integration-debug", className="small"), width=12)]),
+        dbc.Row([dbc.Col(html.Pre(id="news-integration-debug", className="small dark-pre"), width=12)]),
     ],
     fluid=True,
     className="py-4",
