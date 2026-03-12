@@ -24,7 +24,7 @@ SAMPLE_PAYLOAD = {
         "generated_at": DIGEST_UTC_ISO,
         "run_id": "digest-abc123",
     },
-    "summary": {"articles": 2, "scored_articles": 2, "high_scoring_articles": 1},
+    "summary": {"articles": 3, "scored_articles": 3, "high_scoring_articles": 2},
     "analysis": {"lens_summary": {}, "source_differentiation": {}},
     "articles": [
         {
@@ -38,6 +38,8 @@ SAMPLE_PAYLOAD = {
             "topic_tags": ["General"],
             "source": {"id": "pbs-newshour", "name": "PBS NewsHour"},
             "feed": {"name": "Headlines", "url": "https://example.com/feed"},
+            "scraped": {"title": "Latest Story", "body_text": "Body"},
+            "scrape_error": None,
             "score": {"value": 14.0, "max_value": 20.0, "percent": 70.0, "rubric_count": 3},
             "high_score": {"overall_score": 14.0, "overall_percent": 70.0, "lens_scores": {"L1": 7.0}},
         },
@@ -52,8 +54,26 @@ SAMPLE_PAYLOAD = {
             "topic_tags": ["OpenAI"],
             "source": {"id": "npr", "name": "NPR"},
             "feed": {"name": "World", "url": "https://example.com/world"},
+            "scraped": {"title": "Older Story", "body_text": "Body"},
+            "scrape_error": None,
             "score": {"value": 8.0, "max_value": 20.0, "percent": 40.0, "rubric_count": 3},
             "high_score": None,
+        },
+        {
+            "id": "a-3",
+            "title": "Failed Scrape Story",
+            "link": "https://example.com/failed",
+            "published": "2026-03-03T03:10:00Z",
+            "summary": "Summary 3",
+            "ai_summary": "AI Summary 3",
+            "ai_tags": ["OpenAI"],
+            "topic_tags": ["General"],
+            "source": {"id": "failed-source", "name": "Failed Source"},
+            "feed": {"name": "Errors", "url": "https://example.com/errors"},
+            "scraped": None,
+            "scrape_error": "HTTP 500",
+            "score": {"value": 20.0, "max_value": 20.0, "percent": 100.0, "rubric_count": 3},
+            "high_score": {"overall_score": 20.0, "overall_percent": 100.0, "lens_scores": {"L1": 10.0}},
         },
     ],
 }
@@ -90,6 +110,8 @@ class NewsEndpointTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(len(payload["data"]), 2)
+        self.assertEqual(payload["meta"]["input_articles_count"], 3)
+        self.assertEqual(payload["meta"]["excluded_unscraped_articles"], 1)
 
         response = self.client.get("/api/news/digest?tag=openai")
         self.assertEqual(response.status_code, 200)
@@ -103,6 +125,7 @@ class NewsEndpointTests(unittest.TestCase):
         latest = self.client.get("/api/news/digest/latest")
         self.assertEqual(latest.status_code, 200)
         self.assertEqual(latest.get_json()["data"]["id"], "a-1")
+        self.assertEqual(latest.get_json()["meta"]["excluded_unscraped_articles"], 1)
 
         bad_limit = self.client.get("/api/news/digest?limit=0")
         self.assertEqual(bad_limit.status_code, 400)
@@ -144,6 +167,9 @@ class NewsEndpointTests(unittest.TestCase):
         stats_payload = stats.get_json()
         self.assertEqual(stats_payload["status"], "ok")
         self.assertIn("derived", stats_payload["data"])
+        self.assertEqual(stats_payload["data"]["derived"]["input_articles"], 3)
+        self.assertEqual(stats_payload["data"]["derived"]["excluded_unscraped_articles"], 1)
+        self.assertEqual(stats_payload["data"]["derived"]["total_articles"], 2)
         chart_aggregates = stats_payload["data"]["derived"]["chart_aggregates"]
         self.assertEqual(len(chart_aggregates["score_histogram_bins"]), 10)
         self.assertEqual(len(chart_aggregates["tag_count_distribution"]), 6)

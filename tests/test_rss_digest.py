@@ -17,7 +17,7 @@ SAMPLE_PAYLOAD = {
     "schema_version": "1.0",
     "generated_at": "2026-03-02T20:54:00Z",
     "contract": "rss_pipeline_precomputed",
-    "summary": {"articles": 2, "scored_articles": 2, "high_scoring_articles": 1},
+    "summary": {"articles": 3, "scored_articles": 3, "high_scoring_articles": 2},
     "analysis": {"lens_summary": {}, "source_differentiation": {}},
     "articles": [
         {
@@ -31,6 +31,8 @@ SAMPLE_PAYLOAD = {
             "topic_tags": ["General"],
             "source": {"id": "pbs-newshour", "name": "PBS NewsHour"},
             "feed": {"name": "Headlines", "url": "https://example.com/feed"},
+            "scraped": {"title": "Latest Story", "body_text": "Body"},
+            "scrape_error": None,
             "score": {"value": 14.0, "max_value": 20.0, "percent": 70.0, "rubric_count": 3},
             "high_score": {"overall_score": 14.0, "overall_percent": 70.0, "lens_scores": {"L1": 7.0}},
         },
@@ -45,8 +47,26 @@ SAMPLE_PAYLOAD = {
             "topic_tags": ["OpenAI"],
             "source": {"id": "npr", "name": "NPR"},
             "feed": {"name": "World", "url": "https://example.com/world"},
+            "scraped": {"title": "Older Story", "body_text": "Body"},
+            "scrape_error": None,
             "score": {"value": 8.0, "max_value": 20.0, "percent": 40.0, "rubric_count": 3},
             "high_score": None,
+        },
+        {
+            "id": "a-3",
+            "title": "Failed Scrape Story",
+            "link": "https://example.com/failed",
+            "published": "2026-03-03T04:00:00Z",
+            "summary": "Summary 3",
+            "ai_summary": "AI Summary 3",
+            "ai_tags": ["OpenAI"],
+            "topic_tags": ["General"],
+            "source": {"id": "failed-source", "name": "Failed Source"},
+            "feed": {"name": "Errors", "url": "https://example.com/errors"},
+            "scraped": None,
+            "scrape_error": "HTTP 403",
+            "score": {"value": 20.0, "max_value": 20.0, "percent": 100.0, "rubric_count": 3},
+            "high_score": {"overall_score": 20.0, "overall_percent": 100.0, "lens_scores": {"L1": 10.0}},
         },
     ],
 }
@@ -61,6 +81,7 @@ class RssDigestServiceTests(unittest.TestCase):
     def test_normalize_and_filter_semantics(self):
         records = normalize_articles(SAMPLE_PAYLOAD)
         self.assertEqual(len(records), 2)
+        self.assertNotIn("a-3", [record["id"] for record in records])
         self.assertEqual(records[0]["source"]["name"], "PBS NewsHour")
         self.assertIn("OpenAI", records[0]["tags"])
 
@@ -100,6 +121,8 @@ class RssDigestServiceTests(unittest.TestCase):
         self.assertEqual(ordered[0]["id"], "a-1")
 
         stats = derive_stats(ordered, SAMPLE_PAYLOAD)
+        self.assertEqual(stats["input_articles"], 3)
+        self.assertEqual(stats["excluded_unscraped_articles"], 1)
         self.assertEqual(stats["total_articles"], 2)
         self.assertEqual(stats["scored_articles"], 2)
         self.assertEqual(stats["high_scoring_articles"], 1)
@@ -140,7 +163,7 @@ class RssDigestServiceTests(unittest.TestCase):
         self.assertFalse(first["using_last_good"])
         self.assertEqual(len(first["articles_normalized"]), 2)
 
-        client.source_url = "https://127.0.0.1:1/not-available.json"
+        client.current_source_url = "https://127.0.0.1:1/not-available.json"
         second = client.get_payload(force_refresh=True)
         self.assertTrue(second["using_last_good"])
         self.assertTrue(second["error"])

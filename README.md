@@ -99,8 +99,10 @@ Filter semantics:
 - `date` uses UTC date from parsed `articles[].published`.
 - `tag` matches `ai_tags` and `topic_tags` (case-insensitive exact match).
 - `source` matches `source.name`, `source.id`, and `feed.name` (case-insensitive contains).
+- scrape-success gating: digest + stats include only articles that scraped successfully (no `scrape_error` and non-empty `scraped` payload when present).
 
 Response metadata includes `source_mode` (`current` or `snapshot`), `snapshot_date` (when set), and resolved `source_url`.
+It also includes `input_articles_count` and `excluded_unscraped_articles` so exclusion behavior is visible in every API response.
 
 Current mode (`RSS_DAILY_JSON_URL`) uses last-good fallback on upstream failures and reports the fetch error in metadata. Snapshot mode does not fall back to current data; missing snapshot files return `404`.
 

@@ -210,6 +210,23 @@ def _unique_case_insensitive(values: list[str]) -> list[str]:
     return unique
 
 
+def _scrape_succeeded(article: dict[str, Any]) -> bool:
+    scrape_error = _clean_text(article.get("scrape_error"))
+    if scrape_error:
+        return False
+
+    # Legacy payloads may not include scrape fields; keep them eligible.
+    if "scraped" not in article:
+        return True
+
+    scraped = article.get("scraped")
+    return isinstance(scraped, dict) and bool(scraped)
+
+
+def _successful_scrape_records(payload: Any) -> list[dict[str, Any]]:
+    return [record for record in extract_records(payload) if _scrape_succeeded(record)]
+
+
 def normalize_article(article: dict[str, Any]) -> dict[str, Any]:
     source = article.get("source")
     source_obj = source if isinstance(source, dict) else {}
@@ -277,7 +294,7 @@ def normalize_article(article: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_articles(payload: Any) -> list[dict[str, Any]]:
-    records = extract_records(payload)
+    records = _successful_scrape_records(payload)
     return [normalize_article(record) for record in records]
 
 
@@ -409,6 +426,9 @@ def _score_heatmap_label(score_percent: float) -> str:
 
 
 def derive_stats(records: list[dict[str, Any]], payload: Any) -> dict[str, Any]:
+    input_records = extract_records(payload)
+    excluded_unscraped_articles = len(input_records) - len(records)
+
     source_counter: Counter[str] = Counter()
     tag_counter: Counter[str] = Counter()
     daily_counter: Counter[str] = Counter()
@@ -549,6 +569,8 @@ def derive_stats(records: list[dict[str, Any]], payload: Any) -> dict[str, Any]:
     high_score_ratio = (high_scoring_articles / total_articles) if total_articles else 0.0
 
     return {
+        "input_articles": len(input_records),
+        "excluded_unscraped_articles": excluded_unscraped_articles,
         "total_articles": total_articles,
         "scored_articles": scored_articles,
         "high_scoring_articles": high_scoring_articles,
@@ -677,14 +699,18 @@ class RssDigestClient:
         digest_obj = digest if isinstance(digest, dict) else {}
         digest_generated_at = parse_datetime(digest_obj.get("generated_at"))
 
+        input_records = extract_records(payload)
         records = normalize_articles(payload)
         ordered_records = sort_records_desc(records)
         stats = derive_stats(ordered_records, payload)
+        excluded_unscraped_articles = len(input_records) - len(ordered_records)
 
         return {
             "payload": payload,
             "articles_normalized": ordered_records,
             "stats": stats,
+            "input_articles_count": len(input_records),
+            "excluded_unscraped_articles": excluded_unscraped_articles,
             "generated_at": _as_iso_utc(generated_at),
             "generated_at_dt": generated_at,
             "schema_version": payload.get("schema_version") if isinstance(payload, dict) else None,

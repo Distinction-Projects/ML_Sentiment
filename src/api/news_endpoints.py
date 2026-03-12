@@ -44,6 +44,8 @@ def _common_meta(bundle: dict[str, Any], filtered_count: int, returned_count: in
         "from_cache": bundle["from_cache"],
         "using_last_good": bundle["using_last_good"],
         "fetch_error": bundle["error"],
+        "input_articles_count": bundle.get("input_articles_count"),
+        "excluded_unscraped_articles": bundle.get("excluded_unscraped_articles"),
         "filtered_count": filtered_count,
         "returned_count": returned_count,
     }
