@@ -1,132 +1,275 @@
-# SARIMA Dashboard (Python + Dash)
-(testing small change)
-Interactive Plotly Dash application that guides you through SARIMA modeling for time series forecasting using Python. The current dependency set targets Python 3.11 (works on 3.10–3.12, but 3.11 is recommended locally and on Render).
+# NewsLens
 
-- Live app: https://gabria1.pythonanywhere.com/
-- Original tutorial: [Time Series Data Analysis with SARIMA and Dash](https://medium.com/towards-data-science/time-series-data-analysis-with-sarima-and-dash-f4199c3fc092) on Towards Data Science. Please retain this attribution if you reuse or deploy.
+NewsLens is a Dash application with two distinct surfaces:
 
-## Workflow in the app
-- **Data set up:** start from the built-in AirPassengers dataset (`src/data/AirPassengers.csv`). The app expects two columns (`Time`, `Values`) parsed as dates and numeric data.
-- **Stationarity checks:** apply log transforms and differencing, run the Augmented Dickey-Fuller test, and inspect ACF/PACF and Box-Cox plots.
-- **Model selection:** run a SARIMA `(p,d,q)(P,D,Q,m)` grid search scored by AIC with train/test split control.
-- **Prediction:** fit the selected model, visualize train/test forecasts with confidence intervals, and review residual ACF/PACF.
+- a local sentiment-model playground for evaluating and testing text classifiers
+- a read-only RSS/OpenAI news dashboard fed from the public `RSS_Feeds` repository
 
-## Run locally (Python 3.11)
+The app is designed so daily upstream JSON updates do not require a new image build. DigitalOcean serves the same image while the app refreshes the upstream RSS contract at runtime.
+
+## What the app includes
+
+### Sentiment model lab
+- `/` home page with quick entry points into the app
+- `/evaluation` model evaluation across the local corpora
+- `/text` ad hoc sentiment testing for user-provided text
+- local cached models generated from `src/data/train5.csv`
+
+### RSS / news dashboards
+- `/news/digest`
+- `/news/stats`
+- `/news/sources`
+- `/news/tags`
+- `/news/score-lab`
+- `/news/trends`
+- `/news/scraped`
+- `/news/workflow-status`
+- `/news/snapshot-compare`
+- `/news/raw-json`
+- `/news/integration`
+
+## Local run
+
+This repo is pinned to Python `3.11` in `.python-version`.
+
 ```bash
-git clone <your fork of this repo>
+git clone <your fork or the canonical repo>
 cd NewsLens
 
-# macOS / Linux (recommended when available)
 python3.11 -m venv .venv
 source .venv/bin/activate
 
-# Windows (PowerShell) — preferred if you have the Python launcher
-py -3.11 -m venv .venv
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process -Force
-.\.venv\Scripts\Activate.ps1
-
-# Windows (Command Prompt)
-py -3.11 -m venv .venv
-.\.venv\Scripts\activate.bat
-
-# If `py` is not available but `python` points to a suitable interpreter
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1   # PowerShell
-
 pip install --upgrade pip
 pip install -r requirements.txt
-# Pre-download NLTK data to speed up first run (optional; auto-downloads on startup if missing)
 python -m nltk.downloader stopwords punkt wordnet vader_lexicon punkt_tab
-# Pre-build cached models and evaluation metrics for faster runtime inference (recommended; done during cloud builds)
 python -m src.cache_models
 python -m src.app
 ```
 
-The server runs at http://localhost:8050 by default. Edit `src/app.py` to set `debug=True` while developing if you want auto-reload. The `.venv` folder is gitignored; if you use a different env name, add it to `.gitignore` to keep it out of commits.
+Default local URL:
 
-### VS Code tasks (macOS/Linux)
-If you use VS Code, there is a simple task setup in `.vscode/tasks.json` to automate the local workflow. The `Setup: Full local` task runs automatically on folder open; remove the `runOptions` block in `.vscode/tasks.json` if you want to opt out.
-- `Setup: Full local` creates the venv, installs requirements, downloads NLTK data, and builds cached models + metrics.
-- `App: Run (Dash)` starts the server with `python -m src.app`.
+- `http://localhost:8050`
 
-Windows users should follow the manual commands above.
+Pages to check first after startup:
 
-### Production-style local run
-If you want to mirror the DigitalOcean command locally, run:
+- `http://localhost:8050/`
+- `http://localhost:8050/news/digest`
+- `http://localhost:8050/news/workflow-status`
+- `http://localhost:8050/news/snapshot-compare`
+
+## Production-style local run
+
+If you want the same startup shape as DigitalOcean, run Gunicorn locally:
+
 ```bash
-gunicorn --chdir src --timeout 600 app:server --bind 0.0.0.0:${PORT:-8050} --worker-tmp-dir ${WORKER_TMP_DIR:-/tmp}
+PORT=8050 WORKER_TMP_DIR=/tmp gunicorn --chdir src --timeout 600 app:server --bind 0.0.0.0:$PORT --worker-tmp-dir ${WORKER_TMP_DIR}
 ```
 
-### RSS Digest API (read-only consumer)
-This app consumes the app-facing precomputed contract JSON from RSS_Feeds and exposes runtime APIs without rebuilding the image for each data update.
+## App bootstrap rules
 
-Set these environment variables:
-- `RSS_DAILY_JSON_URL` (optional): upstream JSON URL. Default:
-  `https://raw.githubusercontent.com/Distinction-Projects/RSS_Feeds/main/data/processed/rss_openai_precomputed.json`
-- `RSS_HISTORY_JSON_URL_TEMPLATE` (optional): snapshot URL template. Default:
-  `https://raw.githubusercontent.com/Distinction-Projects/RSS_Feeds/main/data/history/rss_openai_daily_{date}.json`
-  (`{date}` is replaced with `YYYY-MM-DD`)
-- `RSS_CACHE_TTL_SECONDS` (optional, default `3600`): in-memory TTL cache duration.
-- `RSS_HTTP_TIMEOUT_SECONDS` (optional, default `20`): HTTP timeout for upstream fetches.
-- `RSS_MAX_AGE_SECONDS` (optional, default `129600`): freshness SLO for `generated_at` (36 hours).
+The app bootstrap in `src/app.py` is intentionally opinionated:
+
+- Dash page autodiscovery is disabled with `pages_folder=""`
+- pages are imported explicitly from `src.pages`
+- the Flask server is exported as `server` for Gunicorn
+- page files should set an explicit `path=...` in `dash.register_page(...)`
+
+This is the guardrail that keeps routing consistent between:
+
+- `python -m src.app`
+- `gunicorn --chdir src app:server`
+
+Do not switch back to inferred page paths unless you also change the import strategy. That is how routes quietly drift into module-derived URLs like `/src/pages/...`.
+
+## News runtime flow
+
+The RSS/news side of the app is a read-only runtime consumer. The deployment image is not rebuilt for daily news updates.
+
+Runtime flow:
+
+1. `src/services/rss_digest.py` fetches the public JSON contract from `RSS_Feeds`
+2. the service normalizes articles, computes lightweight derived stats, and caches the result in memory
+3. `src/api/news_endpoints.py` serves digest, stats, and freshness endpoints from that processed bundle
+4. Dash news pages render from those endpoints
+
+This means:
+
+- content updates come from upstream JSON refreshes, not code deploys
+- image rebuilds are only needed when app code, dependencies, or static assets change
+- snapshot mode reads immutable history files by `snapshot_date=YYYY-MM-DD`
+
+## RSS runtime configuration
+
+The news dashboards consume the public app-facing JSON contract from `RSS_Feeds`.
+
+Environment variables:
+
+- `RSS_DAILY_JSON_URL`
+  Default: `https://raw.githubusercontent.com/Distinction-Projects/RSS_Feeds/main/data/processed/rss_openai_precomputed.json`
+- `RSS_HISTORY_JSON_URL_TEMPLATE`
+  Default: `https://raw.githubusercontent.com/Distinction-Projects/RSS_Feeds/main/data/history/rss_openai_daily_{date}.json`
+- `RSS_CACHE_TTL_SECONDS`
+  Default: `3600`
+- `RSS_HTTP_TIMEOUT_SECONDS`
+  Default: `20`
+- `RSS_MAX_AGE_SECONDS`
+  Default: `129600`
+
+The app supports current mode and snapshot mode. Snapshot mode is selected with `snapshot_date=YYYY-MM-DD` on the existing digest and stats endpoints.
+
+## Runtime API
 
 Available endpoints:
-- `GET /api/news/digest/latest`: latest item from the digest feed.
-- `GET /api/news/digest`: full/filtered digest list.
-- `GET /api/news/stats`: derived source/tag/score/time stats from normalized articles.
-- `GET /health/news-freshness`: health check based on payload `generated_at`.
 
-Dash pages for this data:
-- `/news/digest`: filterable digest view and latest-card view.
-- `/news/stats`: charts/cards for source, tags, score distribution, and daily counts.
-- `/news/integration`: CI-oriented runtime checks for endpoint reachability, payload presence, and freshness state.
-- `/news/scraped`: grouped-by-source view of raw `articles[].scraped` payloads from the digest.
-- `/news/trends`: time-focused trend views (daily counts + publish-hour distribution).
-- `/news/sources`: source leaderboard + source score summary table.
-- `/news/tags`: top tags + tag density + source-tag heatmap.
-- `/news/score-lab`: score histogram + high-score-by-source + score/tag heatmap.
-- `/news/raw-json`: raw endpoint payload explorer for debugging and QA.
+- `GET /api/news/digest`
+- `GET /api/news/digest/latest`
+- `GET /api/news/stats`
+- `GET /health/news-freshness`
 
-Optional query params on digest endpoints:
+Supported digest and stats query params:
+
 - `date=YYYY-MM-DD`
 - `tag=<tag>`
 - `source=<source>`
-- `limit=<positive-int>` (`/api/news/digest` only)
-- `snapshot_date=YYYY-MM-DD` (supported on `/api/news/digest`, `/api/news/digest/latest`, and `/api/news/stats`)
-- `refresh=true` (forces a cache refresh)
+- `limit=<positive-int>`
+- `snapshot_date=YYYY-MM-DD`
+- `refresh=true`
 
-Filter semantics:
-- `date` uses UTC date from parsed `articles[].published`.
-- `tag` matches `ai_tags` and `topic_tags` (case-insensitive exact match).
-- `source` matches `source.name`, `source.id`, and `feed.name` (case-insensitive contains).
-- scrape-success gating: digest + stats include only articles that scraped successfully (no `scrape_error` and non-empty `scraped` payload when present).
+Filter behavior:
 
-Response metadata includes `source_mode` (`current` or `snapshot`), `snapshot_date` (when set), and resolved `source_url`.
-It also includes `input_articles_count` and `excluded_unscraped_articles` so exclusion behavior is visible in every API response.
+- `date` uses the parsed UTC publish date
+- `tag` matches `ai_tags` and `topic_tags` with case-insensitive exact match
+- `source` matches `source.name`, `source.id`, and `feed.name` with case-insensitive contains
+- digest and stats exclude articles that failed scraping
 
-Current mode (`RSS_DAILY_JSON_URL`) uses last-good fallback on upstream failures and reports the fetch error in metadata. Snapshot mode does not fall back to current data; missing snapshot files return `404`.
+Metadata returned by the news endpoints includes:
 
-The client also supports ETag conditional requests (`If-None-Match`) to avoid re-downloading unchanged artifacts.
+- `source_mode`
+- `snapshot_date`
+- `source_url`
+- `input_articles_count`
+- `excluded_unscraped_articles`
 
-### Working with data
-- The default AirPassengers sample lives in `src/data/AirPassengers.csv`. Replace that file (keep the `Time` and `Values` headers) to experiment with your own series.
-- Restart the app after swapping data to ensure the in-memory dataset refreshes.
+## Local verification
 
-## Deploy to DigitalOcean
-- DigitalOcean App Platform: the included `app.yaml` is a ready-to-deploy spec. Point App Platform at this repo (`Distinction-Projects/NewsLens`, branch `main`), confirm the detected spec, and deploy. Adjust the repo/branch in the manifest if your fork differs. The spec installs requirements, pre-downloads NLTK data, and starts `gunicorn --chdir src --timeout 600 app:server --bind 0.0.0.0:$PORT --worker-tmp-dir ${WORKER_TMP_DIR:-/tmp}` with Python 3.11 on a `basic-xxs` instance. A `.python-version` file pins Python 3.11 for the DO buildpack. `WORKER_TMP_DIR` defaults to `/dev/shm` (set in `app.yaml`) but the command falls back to `/tmp` if that path is absent (e.g., local macOS test).
-- Manual commands (if you prefer to enter them in the UI): build `pip install -r requirements.txt && python -m nltk.downloader stopwords punkt wordnet vader_lexicon punkt_tab && python -m src.cache_models`; run `gunicorn --chdir src --timeout 600 app:server --bind 0.0.0.0:$PORT --worker-tmp-dir ${WORKER_TMP_DIR:-/tmp}`.
+Useful checks:
+
+```bash
+python -m py_compile src/app.py src/api/news_endpoints.py src/services/rss_digest.py src/pages/*.py src/components/*.py
+python -m unittest discover -s tests -v
+```
+
+If you are offline and NLTK resources have not already been downloaded, run the downloader command above once before starting the app or running tests.
+
+## DigitalOcean deploy
+
+This repo already includes a ready-to-deploy `app.yaml` for DigitalOcean App Platform.
+
+- Repo: `Distinction-Projects/NewsLens`
+- Branch: `main`
+- Runtime: Python 3.11
+- Start command: `gunicorn --chdir src --timeout 600 app:server --bind 0.0.0.0:$PORT --worker-tmp-dir ${WORKER_TMP_DIR:-/tmp}`
+
+The build step installs requirements, downloads NLTK resources, and pre-builds the cached local models:
+
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+python -m nltk.downloader stopwords punkt wordnet vader_lexicon punkt_tab
+python -m src.cache_models
+```
+
+## App Platform vs Droplet
+
+These two DigitalOcean paths are different:
+
+- `app.yaml` is for DigitalOcean App Platform.
+- `Procfile` is a process command convention and is useful for App Platform style deploys.
+- A Droplet does not automatically read either file.
+
+On a Droplet, you are responsible for:
+
+- installing Python
+- creating the virtualenv
+- running Gunicorn under `systemd`
+- putting `nginx` in front of Gunicorn
+- storing runtime env vars on the server
+
+For this repo, the App Platform path is faster. The Droplet path is better if you want to learn Linux service management and own the full runtime.
+
+## DigitalOcean Droplet
+
+If you want the hands-on deployment path, this repo now includes a droplet scaffold in `deploy/droplet/`.
+
+Files:
+
+- `deploy/droplet/newslens.service`
+- `deploy/droplet/nginx.newslens.conf`
+- `deploy/droplet/bootstrap_ubuntu_24_04.sh`
+- `.env.example`
+
+Recommended server shape:
+
+- Ubuntu 24.04 LTS
+- `nginx` on port `80`
+- Gunicorn bound to `127.0.0.1:8000`
+- `systemd` service named `newslens`
+- repo checked out at `/srv/newslens/app`
+- venv at `/srv/newslens/venv`
+- env file at `/etc/newslens/newslens.env`
+
+Important detail:
+
+- Ubuntu 24.04 defaults to Python `3.12`.
+- This repo is currently pinned to Python `3.11`.
+- On a Droplet, install Python `3.11` explicitly before bootstrapping this app.
+
+One reasonable flow on the server:
+
+```bash
+sudo mkdir -p /srv/newslens
+sudo chown $USER:$USER /srv/newslens
+git clone <your repo url> /srv/newslens/app
+cd /srv/newslens/app
+
+sudo bash deploy/droplet/bootstrap_ubuntu_24_04.sh
+```
+
+After bootstrap:
+
+```bash
+sudo systemctl status newslens --no-pager
+sudo journalctl -u newslens -n 100 --no-pager
+sudo nginx -t
+```
+
+If you later add a domain:
+
+```bash
+sudo apt-get install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d your-domain.example
+```
 
 ## Project layout
-```
-src/
-├── app.py               # Dash bootstrap + page/asset config
-├── assets/              # Static assets (CSS, etc.)
-├── components/          # Shared UI elements (nav, footer)
-├── data/                # AirPassengers sample + sentiment training CSV
-├── models/              # Cached vectorizer + trained models (generated)
-├── pages/               # Multi-page Dash views
-└── utils/               # Plot layout helpers, SARIMA utilities
-```
-Each folder is a Python package (via `__init__.py`) so imports stay stable locally and on DigitalOcean.
 
-![dash_app_step03](https://user-images.githubusercontent.com/57110246/236455995-a98416d9-57f3-4c6e-b41b-0583ba66c86d.gif)
+```text
+src/
+├── app.py
+├── NewsLens.py
+├── api/
+├── assets/
+├── components/
+├── data/
+├── models/
+├── pages/
+├── services/
+└── utils/
+```
+
+Key pieces:
+
+- `src/app.py`: Dash bootstrap, page registration, Flask server export
+- `src/NewsLens.py`: local model training, caching, evaluation helpers
+- `src/api/news_endpoints.py`: Flask endpoints for digest, stats, and freshness
+- `src/services/rss_digest.py`: upstream JSON fetch, TTL cache, fallback, normalization, stats derivation
+- `src/pages/`: Dash pages for both model and news surfaces

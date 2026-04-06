@@ -2,7 +2,7 @@ import dash
 from dash import html
 import dash_bootstrap_components as dbc
 
-dash.register_page(__name__, path='/about', name='About', title='Sentiment Analyzer | About')
+dash.register_page(__name__, path='/about', name='About', title='NewsLens | About')
 
 layout = dbc.Container([
     # Header
@@ -98,13 +98,12 @@ layout = dbc.Container([
                         html.Div([
                             html.Div([
                                 html.Span('Phase 4', className='badge bg-secondary me-2'),
-                                html.Strong('News Feed Integration'),
-                                html.Span(' (Upcoming)', className='fst-italic')
+                                html.Strong('News Feed Integration & Dash Expansion')
                             ]),
                             html.P(
-                                'Planned integration with RSS news feeds and the OpenAI API to analyze '
-                                'sentiment trends in real-time global news coverage. This will enable '
-                                'tracking of public sentiment across topics and sources over time.',
+                                'Integrated a read-only RSS/OpenAI JSON contract so the app can show '
+                                'daily digest pages, source and tag breakdowns, workflow checks, and '
+                                'snapshot comparisons without rebuilding the deployment image.',
                                 className='mb-0 ms-5'
                             )
                         ], className='mb-4'),
