@@ -235,13 +235,66 @@ class RssDigestServiceTests(unittest.TestCase):
             source_topic_control["pooled"]["source_lens_effects"],
             stats["source_lens_effects"],
         )
+        self.assertIn("tag_sliced_analysis", stats)
+        tag_sliced_analysis = stats["tag_sliced_analysis"]
+        self.assertEqual(tag_sliced_analysis["tag_basis"], "topic_tags")
+        self.assertEqual(tag_sliced_analysis["multi_tag_policy"], "duplicate_per_tag")
+        self.assertEqual(tag_sliced_analysis["pooled_label"], "tag-confounded")
+        self.assertIn("pooled", tag_sliced_analysis)
+        self.assertIn("tags", tag_sliced_analysis)
+        self.assertIn("summary", tag_sliced_analysis)
+        self.assertEqual(
+            tag_sliced_analysis["pooled"]["source_differentiation"],
+            stats["source_differentiation"],
+        )
+        self.assertEqual(
+            tag_sliced_analysis["pooled"]["source_lens_effects"],
+            stats["source_lens_effects"],
+        )
+        self.assertIn("event_control", stats)
+        self.assertIn("group_latent_space", stats)
+        self.assertIn("tag_lens_pca", stats)
+        group_latent_space = stats["group_latent_space"]
+        self.assertIn(group_latent_space["status"], {"ok", "unavailable"})
+        self.assertEqual(group_latent_space["basis"], "global_lens_pca_mds")
+        self.assertIn("config", group_latent_space)
+        self.assertIn("summary", group_latent_space)
+        self.assertIn("groups", group_latent_space)
+        self.assertIn("source", group_latent_space["groups"])
+        self.assertIn("topic", group_latent_space["groups"])
+        self.assertIn("tag", group_latent_space["groups"])
+        tag_lens_pca = stats["tag_lens_pca"]
+        self.assertIn(tag_lens_pca["status"], {"ok", "unavailable"})
+        self.assertEqual(tag_lens_pca["basis"], "tag_mean_lens_profile_pca")
+        self.assertIn("tag_points", tag_lens_pca)
+        self.assertIn("tag_profiles", tag_lens_pca)
+        self.assertIn("component_extremes", tag_lens_pca)
+        self.assertIn("clusters", tag_lens_pca)
+        self.assertIn("summary", tag_lens_pca)
+        event_control = stats["event_control"]
+        self.assertIn(event_control["status"], {"ok", "unavailable"})
+        self.assertIn("config", event_control)
+        self.assertIn("summary", event_control)
+        self.assertIn("events", event_control)
+        self.assertIn("same_event_source_differentiation", event_control)
+        self.assertIn("same_event_source_lens_effects", event_control)
+        self.assertIn("same_event_pairwise_source_lens_deltas", event_control)
+        self.assertIn("event_coverage", event_control)
+        self.assertIn("same_event_variance_decomposition", event_control)
         self.assertIn("source_reliability", stats)
         source_reliability = stats["source_reliability"]
         self.assertEqual(source_reliability["method"], "heuristic-v1")
         self.assertEqual(source_reliability["pooled_label"], "topic-confounded")
         self.assertIn("pooled", source_reliability)
+        self.assertIn("event_controlled", source_reliability)
         self.assertIn("topics", source_reliability)
+        self.assertIn("tags", source_reliability)
         self.assertIn("summary", source_reliability)
+        self.assertIn(source_reliability["event_controlled"].get("status"), {"ok", "unavailable"})
+        self.assertIn("event_controlled_status", source_reliability["summary"])
+        self.assertIn("event_controlled_tier", source_reliability["summary"])
+        self.assertIn("tag_count", source_reliability["summary"])
+        self.assertIn("ok_tag_count", source_reliability["summary"])
         self.assertIn(source_reliability["pooled"].get("status"), {"ok", "unavailable"})
         self.assertIn(
             source_reliability["pooled"].get("tier"),
@@ -249,6 +302,24 @@ class RssDigestServiceTests(unittest.TestCase):
         )
         self.assertIn("flags", source_reliability["pooled"])
         self.assertIn("metrics", source_reliability["pooled"])
+        self.assertIn("drift_diagnostics", stats)
+        drift_diagnostics = stats["drift_diagnostics"]
+        self.assertIn(drift_diagnostics["status"], {"ok", "unavailable"})
+        self.assertIn("basis", drift_diagnostics)
+        self.assertIn("windows", drift_diagnostics)
+        self.assertIn("lens_drift", drift_diagnostics)
+        self.assertIn("source_distribution_drift", drift_diagnostics)
+        self.assertIn("tag_distribution_drift", drift_diagnostics)
+        self.assertIn("volume_drift", drift_diagnostics)
+        self.assertIn("summary", drift_diagnostics)
+        self.assertIn("tag_momentum", stats)
+        tag_momentum = stats["tag_momentum"]
+        self.assertIn(tag_momentum["status"], {"ok", "unavailable"})
+        self.assertEqual(tag_momentum["basis"], "exponential_decay_recent_vs_baseline")
+        self.assertIn("config", tag_momentum)
+        self.assertIn("rows", tag_momentum)
+        self.assertIn("daily_tag_counts", tag_momentum)
+        self.assertIn("summary", tag_momentum)
         self.assertIn("lens_pca", stats)
         lens_pca = stats["lens_pca"]
         self.assertIn("status", lens_pca)
@@ -291,6 +362,14 @@ class RssDigestServiceTests(unittest.TestCase):
         self.assertIn("points", lens_temporal_embedding_mds)
         self.assertIn("day_centroids", lens_temporal_embedding_mds)
         self.assertIn("summary", lens_temporal_embedding_mds)
+        self.assertIn("latent_space_stability", stats)
+        latent_space_stability = stats["latent_space_stability"]
+        self.assertIn(latent_space_stability["status"], {"ok", "unavailable"})
+        self.assertIn("basis", latent_space_stability)
+        self.assertIn("config", latent_space_stability)
+        self.assertIn("components", latent_space_stability)
+        self.assertIn("loading_stability", latent_space_stability)
+        self.assertIn("summary", latent_space_stability)
         self.assertIn("lens_views", stats)
         lens_views = stats["lens_views"]
         self.assertIn("coverage_mode", lens_views)
@@ -505,6 +584,225 @@ class RssDigestServiceTests(unittest.TestCase):
         self.assertEqual(separation["coverage_mode"], "complete_rows")
         self.assertIsInstance(separation["source_centroids"], list)
         self.assertIsInstance(separation["centroid_distances"], list)
+
+    def test_latent_space_stability_is_derived_for_complete_rows(self):
+        articles = []
+        for idx in range(10):
+            source_name = "Source A" if idx < 5 else "Source B"
+            base = float(idx)
+            articles.append(
+                {
+                    "id": f"stable-{idx}",
+                    "title": f"Stable {idx}",
+                    "published": f"2026-03-{1 + idx:02d}T00:00:00Z",
+                    "ai_tags": ["OpenAI"],
+                    "topic_tags": ["General"],
+                    "source": {"name": source_name},
+                    "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                    "scraped": {"title": f"Stable {idx}", "body_text": "Body"},
+                    "scrape_error": None,
+                    "score": {
+                        "percent": 70.0,
+                        "lens_scores": {
+                            "Evidence": {"percent": 30.0 + base * 4.0},
+                            "Impact": {"percent": 80.0 - base * 3.0},
+                            "Novelty": {"percent": 45.0 + (base % 3.0) * 8.0},
+                        },
+                    },
+                }
+            )
+        payload = {
+            "analysis": {
+                "lens_summary": {
+                    "lenses": [
+                        {"name": "Evidence", "max_total": 10.0},
+                        {"name": "Impact", "max_total": 10.0},
+                        {"name": "Novelty", "max_total": 10.0},
+                    ]
+                }
+            },
+            "articles": articles,
+        }
+
+        records = normalize_articles(payload)
+        stats = derive_stats(sort_records_desc(records), payload)
+        stability = stats["latent_space_stability"]
+
+        if stability["status"] == "unavailable":
+            self.assertIn("pca", str(stability.get("reason", "")).lower())
+            return
+
+        self.assertEqual(stability["status"], "ok")
+        self.assertEqual(stability["basis"], "deterministic_subsample_pca")
+        self.assertEqual(stability["config"]["resamples"], 12)
+        self.assertGreater(stability["summary"]["resamples_completed"], 0)
+        self.assertGreaterEqual(stability["summary"]["component_count"], 1)
+        self.assertGreater(len(stability["components"]), 0)
+        self.assertGreater(len(stability["loading_stability"]), 0)
+        self.assertIn("mean_cosine_similarity", stability["components"][0])
+        self.assertIn("max_loading_stddev", stability["loading_stability"][0])
+
+    def test_group_latent_space_derives_source_topic_and_tag_centroids(self):
+        articles = []
+        for idx in range(10):
+            source_name = "Source A" if idx < 5 else "Source B"
+            topic_tags = ["Policy", "AI"] if idx == 0 else ["Policy"] if idx < 6 else ["Markets"]
+            ai_tags = ["Risk", "Security"] if idx == 0 else ["Risk"] if idx < 6 else ["Markets"]
+            evidence = 82.0 - idx * 2.0
+            impact = 20.0 + idx * 6.0
+            novelty = 35.0 + (idx % 4) * 9.0
+            articles.append(
+                {
+                    "id": f"group-{idx}",
+                    "title": f"Group latent {idx}",
+                    "published": f"2026-03-{1 + idx:02d}T00:00:00Z",
+                    "ai_tags": ai_tags,
+                    "topic_tags": topic_tags,
+                    "source": {"name": source_name},
+                    "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                    "scraped": {"title": f"Group latent {idx}", "body_text": "Body"},
+                    "scrape_error": None,
+                    "score": {
+                        "lens_scores": {
+                            "Evidence": {"percent": evidence},
+                            "Impact": {"percent": impact},
+                            "Novelty": {"percent": novelty},
+                        }
+                    },
+                }
+            )
+
+        payload = {
+            "analysis": {
+                "lens_summary": {
+                    "lenses": [
+                        {"name": "Evidence", "max_total": 10.0},
+                        {"name": "Impact", "max_total": 10.0},
+                        {"name": "Novelty", "max_total": 10.0},
+                    ]
+                }
+            },
+            "articles": articles,
+        }
+        records = normalize_articles(payload)
+        stats = derive_stats(sort_records_desc(records), payload)
+        group_latent = stats["group_latent_space"]
+
+        if group_latent["status"] == "unavailable":
+            self.assertIn("pca", str(group_latent.get("reason", "")).lower())
+            return
+
+        self.assertEqual(group_latent["status"], "ok")
+        self.assertEqual(group_latent["config"]["min_articles_per_group"], 5)
+        self.assertEqual(group_latent["config"]["tag_basis"], "ai_tags")
+        self.assertGreaterEqual(group_latent["summary"]["group_counts"]["source"], 2)
+        self.assertGreaterEqual(group_latent["summary"]["group_counts"]["topic"], 3)
+        self.assertGreaterEqual(group_latent["summary"]["group_counts"]["tag"], 3)
+        self.assertGreaterEqual(group_latent["summary"]["analyzed_group_counts"]["source"], 2)
+        self.assertIn("clusters", group_latent)
+        self.assertIn("source", group_latent["clusters"])
+        self.assertGreaterEqual(group_latent["summary"]["cluster_counts"]["source"], 1)
+
+        by_source = {row["group"]: row for row in group_latent["groups"]["source"]}
+        self.assertEqual(by_source["Source A"]["status"], "ok")
+        self.assertEqual(by_source["Source B"]["status"], "ok")
+        self.assertEqual(by_source["Source A"]["n_articles"], 5)
+        self.assertIsInstance(by_source["Source A"]["pc1"], float)
+        self.assertIsInstance(by_source["Source A"]["dispersion_pca"], float)
+        self.assertIn("cluster_id", by_source["Source A"])
+        self.assertIn("cluster_label", by_source["Source A"])
+        self.assertTrue(by_source["Source A"]["nearest_groups"])
+        self.assertEqual(by_source["Source A"]["nearest_groups"][0]["group"], "Source B")
+        self.assertTrue(group_latent["clusters"]["source"])
+        self.assertIn("representative_groups", group_latent["clusters"]["source"][0])
+        self.assertIn("defining_lens_deviations", group_latent["clusters"]["source"][0])
+
+        by_topic = {row["group"]: row for row in group_latent["groups"]["topic"]}
+        self.assertEqual(by_topic["Policy"]["n_articles"], 6)
+        self.assertEqual(by_topic["AI"]["n_articles"], 1)
+        self.assertEqual(by_topic["AI"]["status"], "low_sample")
+
+        by_tag = {row["group"]: row for row in group_latent["groups"]["tag"]}
+        self.assertEqual(by_tag["Risk"]["n_articles"], 6)
+        self.assertEqual(by_tag["Security"]["n_articles"], 1)
+        self.assertEqual(by_tag["Security"]["status"], "low_sample")
+        self.assertTrue(by_tag["Risk"]["top_lens_deviations"])
+        self.assertIn("Evidence", {row["lens"] for row in by_tag["Risk"]["top_lens_deviations"]})
+
+    def test_tag_lens_pca_derives_tag_profile_points(self):
+        articles = []
+        tag_specs = [
+            ("Policy", 85.0, 25.0, 30.0),
+            ("Markets", 30.0, 82.0, 35.0),
+            ("Research", 40.0, 35.0, 88.0),
+        ]
+        for tag, evidence, impact, novelty in tag_specs:
+            for idx in range(5):
+                articles.append(
+                    {
+                        "id": f"{tag.lower()}-{idx}",
+                        "title": f"{tag} {idx}",
+                        "published": f"2026-03-{1 + len(articles):02d}T00:00:00Z",
+                        "ai_tags": [tag],
+                        "topic_tags": ["General"],
+                        "source": {"name": f"Source {idx % 2}"},
+                        "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                        "scraped": {"title": f"{tag} {idx}", "body_text": "Body"},
+                        "scrape_error": None,
+                        "score": {
+                            "lens_scores": {
+                                "Evidence": {"percent": evidence + idx},
+                                "Impact": {"percent": impact + idx},
+                                "Novelty": {"percent": novelty + idx},
+                            }
+                        },
+                    }
+                )
+
+        payload = {
+            "analysis": {
+                "lens_summary": {
+                    "lenses": [
+                        {"name": "Evidence", "max_total": 10.0},
+                        {"name": "Impact", "max_total": 10.0},
+                        {"name": "Novelty", "max_total": 10.0},
+                    ]
+                }
+            },
+            "articles": articles,
+        }
+        records = normalize_articles(payload)
+        tag_lens_pca = derive_stats(sort_records_desc(records), payload)["tag_lens_pca"]
+
+        self.assertEqual(tag_lens_pca["status"], "ok")
+        self.assertEqual(tag_lens_pca["basis"], "tag_mean_lens_profile_pca")
+        self.assertEqual(tag_lens_pca["config"]["tag_basis"], "ai_tags")
+        self.assertEqual(tag_lens_pca["summary"]["included_tag_count"], 3)
+        self.assertEqual(tag_lens_pca["n_tags"], 3)
+        self.assertIn("PC1", tag_lens_pca["components"])
+        self.assertIn("component_extremes", tag_lens_pca)
+        self.assertGreaterEqual(len(tag_lens_pca["component_extremes"]), 1)
+        self.assertIn("positive_tags", tag_lens_pca["component_extremes"][0])
+        self.assertIn("negative_tags", tag_lens_pca["component_extremes"][0])
+        self.assertIn("clusters", tag_lens_pca)
+        self.assertGreaterEqual(len(tag_lens_pca["clusters"]), 1)
+        self.assertIn("representative_tags", tag_lens_pca["clusters"][0])
+        self.assertIn("defining_lenses", tag_lens_pca["clusters"][0])
+        self.assertGreaterEqual(tag_lens_pca["summary"]["cluster_count"], 1)
+        self.assertIsNotNone(tag_lens_pca["summary"]["pc1_pc2_cumulative_variance_ratio"])
+        self.assertIsNotNone(tag_lens_pca["summary"]["median_articles_per_tag"])
+        by_tag = {row["tag"]: row for row in tag_lens_pca["tag_points"]}
+        self.assertEqual(set(by_tag), {"Policy", "Markets", "Research"})
+        self.assertNotIn("General", by_tag)
+        self.assertEqual(by_tag["Policy"]["n_articles"], 5)
+        self.assertIsInstance(by_tag["Policy"]["pc1"], float)
+        self.assertTrue(by_tag["Policy"]["nearest_tags"])
+        self.assertTrue(by_tag["Policy"]["top_lenses"])
+        self.assertTrue(by_tag["Policy"]["bottom_lenses"])
+        self.assertIn(by_tag["Policy"]["sample_status"], {"ok", "near_minimum"})
+        self.assertIn("cluster_id", by_tag["Policy"])
+        self.assertIn("cluster_label", by_tag["Policy"])
+        self.assertGreater(by_tag["Policy"]["lens_means"]["Evidence"], by_tag["Policy"]["lens_means"]["Impact"])
 
     def test_score_status_distinguishes_zero_from_unscorable(self):
         payload = {
@@ -734,6 +1032,8 @@ class RssDigestServiceTests(unittest.TestCase):
         source_reliability = stats["source_reliability"]
         self.assertEqual(source_reliability["summary"]["topic_count"], 3)
         self.assertEqual(len(source_reliability["topics"]), 3)
+        self.assertEqual(source_reliability["summary"]["tag_count"], 3)
+        self.assertEqual(len(source_reliability["tags"]), 3)
 
     def test_source_topic_control_marks_unavailable_topic_when_preconditions_fail(self):
         payload = {
@@ -846,6 +1146,173 @@ class RssDigestServiceTests(unittest.TestCase):
                 self.assertGreaterEqual(float(effect_row["p_perm_fdr"]), 0.0)
                 self.assertLessEqual(float(effect_row["p_perm_fdr"]), 1.0)
 
+    def test_tag_sliced_analysis_duplicates_multi_tag_and_tracks_untagged(self):
+        payload = {
+            "analysis": {"lens_summary": {"lenses": [{"name": "Evidence", "max_total": 10.0}]}},
+            "articles": [
+                {
+                    "id": "tag-1",
+                    "title": "Multi tag",
+                    "published": "2026-03-02T03:00:00Z",
+                    "ai_tags": ["X"],
+                    "topic_tags": ["Policy", "AI"],
+                    "source": {"name": "Source A"},
+                    "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                    "scraped": {"title": "Multi tag", "body_text": "Body"},
+                    "scrape_error": None,
+                    "score": {"lens_scores": {"Evidence": {"percent": 60.0}}},
+                },
+                {
+                    "id": "tag-2",
+                    "title": "Policy lower case",
+                    "published": "2026-03-02T01:00:00Z",
+                    "ai_tags": ["X"],
+                    "topic_tags": ["policy"],
+                    "source": {"name": "Source B"},
+                    "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                    "scraped": {"title": "Policy lower case", "body_text": "Body"},
+                    "scrape_error": None,
+                    "score": {"lens_scores": {"Evidence": {"percent": 40.0}}},
+                },
+                {
+                    "id": "tag-3",
+                    "title": "No topic tags",
+                    "published": "2026-03-02T02:00:00Z",
+                    "ai_tags": ["X"],
+                    "topic_tags": [],
+                    "source": {"name": "Source C"},
+                    "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                    "scraped": {"title": "No topic tags", "body_text": "Body"},
+                    "scrape_error": None,
+                    "score": {"lens_scores": {"Evidence": {"percent": 50.0}}},
+                },
+            ],
+        }
+
+        records = normalize_articles(payload)
+        stats = derive_stats(sort_records_desc(records), payload)
+        tag_sliced = stats["tag_sliced_analysis"]
+        tag_rows = tag_sliced["tags"]
+
+        self.assertEqual(tag_sliced["tag_basis"], "topic_tags")
+        self.assertEqual(tag_sliced["multi_tag_policy"], "duplicate_per_tag")
+        self.assertEqual([row["tag"] for row in tag_rows], ["Policy", "AI", "Untagged"])
+        by_tag = {row["tag"]: row for row in tag_rows}
+        self.assertEqual(by_tag["Policy"]["n_articles"], 2)
+        self.assertEqual(by_tag["Policy"]["n_sources"], 2)
+        self.assertEqual(by_tag["AI"]["n_articles"], 1)
+        self.assertEqual(by_tag["Untagged"]["n_articles"], 1)
+        self.assertEqual(by_tag["Policy"]["lens_summary"]["lenses"][0]["lens"], "Evidence")
+        self.assertIn("daily_counts", by_tag["Policy"]["trends"])
+        self.assertEqual(sum(row["n_articles"] for row in tag_rows), 4)
+        self.assertEqual(tag_sliced["summary"]["tag_count"], 3)
+        self.assertEqual(tag_sliced["summary"]["shown_tag_count"], 3)
+        self.assertEqual(tag_sliced["summary"]["total_memberships"], 4)
+
+    def test_tag_sliced_analysis_marks_unavailable_tag_when_preconditions_fail(self):
+        payload = {
+            "analysis": {"lens_summary": {"lenses": [{"name": "Evidence", "max_total": 10.0}]}},
+            "articles": [
+                {
+                    "id": "tag-u-1",
+                    "title": "Single source one",
+                    "published": "2026-03-02T00:00:00Z",
+                    "ai_tags": ["X"],
+                    "topic_tags": ["SingleTag"],
+                    "source": {"name": "Only Source"},
+                    "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                    "scraped": {"title": "Single source one", "body_text": "Body"},
+                    "scrape_error": None,
+                    "score": {"lens_scores": {"Evidence": {"percent": 60.0}}},
+                },
+                {
+                    "id": "tag-u-2",
+                    "title": "Single source two",
+                    "published": "2026-03-02T01:00:00Z",
+                    "ai_tags": ["X"],
+                    "topic_tags": ["SingleTag"],
+                    "source": {"name": "Only Source"},
+                    "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                    "scraped": {"title": "Single source two", "body_text": "Body"},
+                    "scrape_error": None,
+                    "score": {"lens_scores": {"Evidence": {"percent": 55.0}}},
+                },
+            ],
+        }
+
+        records = normalize_articles(payload)
+        stats = derive_stats(sort_records_desc(records), payload)
+        tag_sliced = stats["tag_sliced_analysis"]
+        self.assertEqual(tag_sliced["summary"]["tag_count"], 1)
+        self.assertEqual(tag_sliced["summary"]["analyzed_tag_count"], 0)
+        self.assertEqual(tag_sliced["summary"]["unavailable_tag_count"], 1)
+        source_reliability = stats["source_reliability"]
+        self.assertEqual(source_reliability["summary"]["tag_count"], 1)
+        self.assertEqual(source_reliability["summary"]["ok_tag_count"], 0)
+        self.assertEqual(source_reliability["summary"]["unavailable_tag_count"], 1)
+        self.assertEqual(source_reliability["tags"][0]["tag"], "SingleTag")
+        self.assertEqual(source_reliability["tags"][0]["assessment"]["status"], "unavailable")
+
+        tag_row = tag_sliced["tags"][0]
+        self.assertEqual(tag_row["tag"], "SingleTag")
+        self.assertEqual(tag_row["source_differentiation"]["status"], "unavailable")
+        self.assertTrue(tag_row["source_differentiation"]["reason"])
+        self.assertEqual(tag_row["source_lens_effects"]["status"], "unavailable")
+        self.assertTrue(tag_row["source_lens_effects"]["reason"])
+
+    def test_tag_sliced_analysis_can_reduce_pooled_confound_signal(self):
+        articles = []
+        for index, (source_suffix, score) in enumerate((("A", 92), ("A", 90), ("A", 88), ("B", 89)), start=1):
+            articles.append(
+                {
+                    "id": f"tag1-{index}",
+                    "title": f"Tag1 {index}",
+                    "published": f"2026-03-02T0{index}:00:00Z",
+                    "ai_tags": ["X"],
+                    "topic_tags": ["Tag1"],
+                    "source": {"name": f"Source {source_suffix}"},
+                    "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                    "scraped": {"title": f"Tag1 {index}", "body_text": "Body"},
+                    "scrape_error": None,
+                    "score": {"lens_scores": {"Evidence": {"percent": float(score)}}},
+                }
+            )
+        for index, (source_suffix, score) in enumerate((("A", 11), ("B", 9), ("B", 10), ("B", 12)), start=1):
+            articles.append(
+                {
+                    "id": f"tag2-{index}",
+                    "title": f"Tag2 {index}",
+                    "published": f"2026-03-03T0{index}:00:00Z",
+                    "ai_tags": ["X"],
+                    "topic_tags": ["Tag2"],
+                    "source": {"name": f"Source {source_suffix}"},
+                    "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                    "scraped": {"title": f"Tag2 {index}", "body_text": "Body"},
+                    "scrape_error": None,
+                    "score": {"lens_scores": {"Evidence": {"percent": float(score)}}},
+                }
+            )
+
+        payload = {
+            "analysis": {"lens_summary": {"lenses": [{"name": "Evidence", "max_total": 10.0}]}},
+            "articles": articles,
+        }
+        records = normalize_articles(payload)
+        stats = derive_stats(sort_records_desc(records), payload)
+        tag_sliced = stats["tag_sliced_analysis"]
+
+        pooled_row = tag_sliced["pooled"]["source_lens_effects"]["rows"][0]
+        pooled_eta = float(pooled_row["eta_sq"])
+        tag_etas = []
+        for tag_row in tag_sliced["tags"]:
+            tag_rows = tag_row["source_lens_effects"]["rows"]
+            self.assertTrue(tag_rows)
+            tag_etas.append(float(tag_rows[0]["eta_sq"]))
+
+        self.assertGreater(pooled_eta, max(tag_etas))
+        self.assertEqual(tag_sliced["summary"]["tag_count"], 2)
+        self.assertEqual(tag_sliced["summary"]["analyzed_tag_count"], 2)
+
     def test_source_lens_effects_fdr_is_monotonic_and_bounded(self):
         articles = []
         lens_specs = (
@@ -925,6 +1392,125 @@ class RssDigestServiceTests(unittest.TestCase):
             topic_effects = topic_row["source_lens_effects"]
             self.assertEqual(topic_effects["multiple_testing"]["method"], "benjamini-hochberg")
             self.assertGreaterEqual(topic_effects["multiple_testing"]["n_tests"], 0)
+
+    def test_drift_diagnostics_detects_lens_source_and_tag_shift(self):
+        payload = {
+            "analysis": {
+                "lens_summary": {
+                    "lenses": [
+                        {"name": "Framing", "max_total": 20.0},
+                        {"name": "Tone", "max_total": 20.0},
+                    ]
+                }
+            },
+            "articles": [
+                {
+                    "id": "b1",
+                    "published": "2026-01-01T12:00:00Z",
+                    "source": {"name": "Source A"},
+                    "ai_tags": ["policy"],
+                    "scraped": {"body_text": "ok"},
+                    "score": {
+                        "percent": 50.0,
+                        "lens_scores": {"Framing": {"percent": 20.0}, "Tone": {"percent": 30.0}},
+                    },
+                },
+                {
+                    "id": "b2",
+                    "published": "2026-01-02T12:00:00Z",
+                    "source": {"name": "Source A"},
+                    "ai_tags": ["policy"],
+                    "scraped": {"body_text": "ok"},
+                    "score": {
+                        "percent": 55.0,
+                        "lens_scores": {"Framing": {"percent": 30.0}, "Tone": {"percent": 30.0}},
+                    },
+                },
+                {
+                    "id": "r1",
+                    "published": "2026-01-03T12:00:00Z",
+                    "source": {"name": "Source B"},
+                    "ai_tags": ["conflict"],
+                    "scraped": {"body_text": "ok"},
+                    "score": {
+                        "percent": 80.0,
+                        "lens_scores": {"Framing": {"percent": 80.0}, "Tone": {"percent": 35.0}},
+                    },
+                },
+                {
+                    "id": "r2",
+                    "published": "2026-01-04T12:00:00Z",
+                    "source": {"name": "Source B"},
+                    "ai_tags": ["conflict"],
+                    "scraped": {"body_text": "ok"},
+                    "score": {
+                        "percent": 82.0,
+                        "lens_scores": {"Framing": {"percent": 90.0}, "Tone": {"percent": 35.0}},
+                    },
+                },
+            ],
+        }
+
+        records = normalize_articles(payload)
+        stats = derive_stats(sort_records_desc(records), payload)
+        drift = stats["drift_diagnostics"]
+
+        self.assertEqual(drift["status"], "ok")
+        self.assertEqual(drift["summary"]["severity"], "high")
+        self.assertGreater(drift["summary"]["max_abs_lens_delta"], 50.0)
+        self.assertGreaterEqual(drift["source_distribution_drift"]["total_variation_distance"], 1.0)
+        self.assertGreaterEqual(drift["tag_distribution_drift"]["total_variation_distance"], 1.0)
+        self.assertEqual(drift["lens_drift"][0]["lens"], "Framing")
+        self.assertEqual(drift["windows"]["baseline"]["articles"], 2)
+        self.assertEqual(drift["windows"]["recent"]["articles"], 2)
+
+    def test_tag_momentum_ranks_recent_accelerating_tags(self):
+        records = []
+        for idx in range(8):
+            records.append(
+                {
+                    "id": f"old-ai-{idx}",
+                    "title": f"Old AI {idx}",
+                    "published": "2026-03-01T00:00:00Z",
+                    "tags": ["AI"],
+                    "source": {"name": "Source A"},
+                }
+            )
+        for idx in range(3):
+            records.append(
+                {
+                    "id": f"recent-ai-{idx}",
+                    "title": f"Recent AI {idx}",
+                    "published": "2026-03-14T00:00:00Z",
+                    "tags": ["AI"],
+                    "source": {"name": "Source A"},
+                }
+            )
+        for idx in range(4):
+            records.append(
+                {
+                    "id": f"recent-quantum-{idx}",
+                    "title": f"Recent Quantum {idx}",
+                    "published": "2026-03-14T00:00:00Z",
+                    "tags": ["Quantum"],
+                    "source": {"name": "Source B"},
+                }
+            )
+
+        momentum = derive_stats(records, {"articles": records})["tag_momentum"]
+
+        self.assertEqual(momentum["status"], "ok")
+        self.assertEqual(momentum["summary"]["reference_date"], "2026-03-14")
+        self.assertEqual(momentum["summary"]["recent_articles"], 7)
+        rows = momentum["rows"]
+        self.assertEqual(rows[0]["tag"], "Quantum")
+        self.assertEqual(rows[0]["trend"], "new")
+        self.assertEqual(rows[0]["recent_count"], 4)
+        self.assertEqual(rows[0]["baseline_count"], 0)
+        self.assertEqual(rows[0]["recent_source_count"], 1)
+        self.assertEqual(rows[0]["top_recent_sources"][0], {"source": "Source B", "count": 4})
+        self.assertAlmostEqual(rows[0]["recent_top_source_share"], 1.0)
+        self.assertGreater(rows[0]["momentum_score"], rows[1]["momentum_score"])
 
     def test_last_good_fallback(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as temp:

@@ -42,16 +42,28 @@ export const NEWS_PAGES = [
       "View latent lens components that explain the largest variance in the dataset."
   },
   {
+    slug: "group-latent-space",
+    title: "News Group Latent Space",
+    summary:
+      "Map sources, topics, and tags into the shared lens PCA/MDS space to compare centroid position, dispersion, and nearest neighbors."
+  },
+  {
     slug: "source-differentiation",
     title: "News Source Differentiation",
     summary:
-      "Estimate how separable sources are in lens-score space, including within-topic mode."
+      "Estimate how separable sources are in lens-score space, including within-topic and within-tag modes."
   },
   {
     slug: "source-effects",
     title: "News Source Effects",
     summary:
-      "Compare source effect sizes by lens with pooled vs within-topic views."
+      "Compare source effect sizes by lens with pooled, within-topic, and within-tag views."
+  },
+  {
+    slug: "event-control",
+    title: "News Event Control",
+    summary:
+      "Audit same-story event matching and compare source behavior only where outlets cover matched events."
   },
   {
     slug: "score-lab",

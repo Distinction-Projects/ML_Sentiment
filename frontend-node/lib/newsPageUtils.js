@@ -80,7 +80,10 @@ export function getQueryParam(searchParams, key) {
 
 export function normalizeMode(searchParams) {
   const raw = getQueryParam(searchParams, "mode").toLowerCase();
-  return raw === "within-topic" ? "within-topic" : "pooled";
+  if (raw === "within-topic" || raw === "within-tag") {
+    return raw;
+  }
+  return "pooled";
 }
 
 export function normalizeDataMode(searchParams) {
@@ -142,9 +145,22 @@ export function selectedTopicFromQuery(searchParams, topics) {
   return topics.find((topic) => String(topic?.topic || "") === requested) || topics[0] || null;
 }
 
-export function selectSourceReliabilityView(sourceReliability, mode, selectedTopic) {
+export function selectedTagSliceFromQuery(searchParams, tags) {
+  const requested = getQueryParam(searchParams, "tag_slice");
+  if (!requested) {
+    return tags[0] || null;
+  }
+  return tags.find((tag) => String(tag?.tag || "") === requested) || tags[0] || null;
+}
+
+export function selectSourceReliabilityView(sourceReliability, mode, selectedTopic, selectedTag) {
   const reliability = asObject(sourceReliability);
   const pooled = asObject(reliability.pooled);
+  if (mode === "within-tag" && selectedTag) {
+    const tagRows = asArray(reliability.tags);
+    const match = tagRows.find((row) => String(row?.tag || "") === selectedTag);
+    return asObject(match?.assessment) || pooled;
+  }
   if (mode !== "within-topic" || !selectedTopic) {
     return pooled;
   }

@@ -163,6 +163,72 @@ Rollout order for DB-backed reads:
 
 Keep `NEWS_DATA_BACKEND=json` available as the parity fallback until Postgres-backed API output has been compared against the JSON-backed mode.
 
+Stats can be served dynamically or from a deterministic precomputed snapshot:
+
+```bash
+# Default local mode: derive stats during the request.
+NEWS_STATS_BACKEND=dynamic
+
+# Production mode: serve /api/news/stats from a generated snapshot artifact.
+NEWS_STATS_BACKEND=precomputed
+NEWS_STATS_SNAPSHOT_PATH=data/processed/news_analytics_snapshot.json
+```
+
+Build the stats snapshot before restarting production services:
+
+```bash
+RSS_SOURCE_EFFECT_PERMUTATIONS=20 \
+RSS_SOURCE_DIFF_SLICE_PERMUTATIONS=25 \
+python -m src.analytics.build_news_snapshot --output data/processed/news_analytics_snapshot.json
+```
+
+`RSS_SOURCE_EFFECT_PERMUTATIONS` controls pooled source tests. `RSS_SOURCE_DIFF_SLICE_PERMUTATIONS` controls repeated within-topic/within-tag source-differentiation tests, which should usually stay lower for reliable deploy-time snapshot builds.
+
+If `NEWS_STATS_BACKEND=precomputed` and the snapshot is missing or invalid, `/api/news/stats` returns `503` instead of falling back to request-time analytics.
+
+Event-controlled source analysis is included under `derived.event_control`. It uses embeddings to cluster likely same-story articles, then reruns source differentiation only within multi-source event clusters. Missing embedding credentials do not break stats generation; the event-control block returns `status: unavailable`.
+
+```bash
+NEWS_EVENT_EMBEDDINGS_ENABLED=true
+NEWS_EVENT_EMBEDDING_MODEL=text-embedding-3-small
+NEWS_EVENT_EMBEDDING_DIMENSIONS=512
+NEWS_EVENT_SIMILARITY_THRESHOLD=0.86
+NEWS_EVENT_DATE_WINDOW_DAYS=3
+NEWS_EVENT_EMBEDDING_CACHE_PATH=data/cache/news_event_embeddings.sqlite
+NEWS_EVENT_EMBEDDING_BATCH_SIZE=128
+OPENAI_API_KEY=...
+```
+
+Tag lens PCA is included under `derived.tag_lens_pca`. It treats `ai_tags` as observations and mean lens scores as features, making it useful for comparing tag-level framing profiles independently from article-level centroid overlays.
+
+```bash
+NEWS_TAG_LENS_PCA_MIN_ARTICLES=5
+NEWS_TAG_LENS_PCA_MAX_TAGS=75
+```
+
+Tag momentum is included under `derived.tag_momentum`. It ranks tags using an exponential time-decay score plus recent-vs-baseline lift, which powers the "Tags Blowing Up" and "Tag Momentum Over Time" views.
+
+```bash
+NEWS_TAG_MOMENTUM_HALF_LIFE_DAYS=3
+NEWS_TAG_MOMENTUM_RECENT_WINDOW_DAYS=3
+NEWS_TAG_MOMENTUM_BASELINE_WINDOW_DAYS=14
+NEWS_TAG_MOMENTUM_MAX_TAGS=50
+```
+
+News read endpoints also emit conservative HTTP cache headers by default:
+
+```bash
+NEWS_HTTP_CACHE_SECONDS=300
+NEWS_STATS_HTTP_CACHE_SECONDS=300
+NEWS_HTTP_STALE_SECONDS=3600
+NEWS_SNAPSHOT_HTTP_CACHE_SECONDS=86400
+NEWS_SNAPSHOT_HTTP_STALE_SECONDS=604800
+NEXT_PUBLIC_NEWS_FETCH_REVALIDATE_SECONDS=300
+NEXT_PUBLIC_NEWS_FETCH_TIMEOUT_MS=20000
+```
+
+`refresh=1` requests use `Cache-Control: no-store`. Historical `snapshot_date` requests use the longer snapshot cache window.
+
 ## App bootstrap rules
 
 The bootstrap in `src/app.py` is intentionally opinionated:
@@ -263,6 +329,14 @@ npm run dev
 ```
 
 Set `NEXT_PUBLIC_NEWS_API_BASE_URL` in `.env.local` if your backend URL differs from `http://127.0.0.1:9000`.
+
+When the Next app is served behind a public reverse proxy, set the canonical public URL so generated metadata and absolute URLs do not point back to the raw server IP:
+
+```bash
+NEXT_PUBLIC_SITE_URL=https://lab.spectralresidue.com
+```
+
+The NewsLens droplet can stay on plain HTTP behind the Spectral Residue HTTPS proxy. Its Nginx config preserves incoming `X-Forwarded-Proto` and `X-Forwarded-Host` headers so requests proxied from `https://lab.spectralresidue.com` keep the correct public scheme/host signal.
 
 ## Local verification
 

@@ -14,6 +14,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from src.analytics.news_event_control import build_event_clusters, event_embedding_config_from_env
+
 try:
     import numpy as np
 except Exception:  # pragma: no cover - optional dependency guard
@@ -427,10 +429,23 @@ def sort_records_desc(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 _TAG_COUNT_DISTRIBUTION_LABELS = ("0", "1", "2", "3", "4", "5+")
-_SOURCE_EFFECT_PERMUTATIONS = _coerce_int(os.getenv("RSS_SOURCE_EFFECT_PERMUTATIONS"), default=200, minimum=0)
+_SOURCE_EFFECT_PERMUTATIONS = _coerce_int(os.getenv("RSS_SOURCE_EFFECT_PERMUTATIONS"), default=20, minimum=0)
+_SOURCE_DIFF_SLICE_PERMUTATIONS = _coerce_int(
+    os.getenv("RSS_SOURCE_DIFF_SLICE_PERMUTATIONS"),
+    default=25,
+    minimum=0,
+)
 _SOURCE_EFFECT_RANDOM_SEED = 17
 _PCA_MAX_COMPONENTS = _coerce_int(os.getenv("RSS_PCA_MAX_COMPONENTS"), default=6, minimum=1)
 _MDS_MAX_DIMENSIONS = _coerce_int(os.getenv("RSS_MDS_MAX_DIMENSIONS"), default=3, minimum=1)
+_GROUP_LATENT_MIN_ARTICLES = _coerce_int(os.getenv("NEWS_GROUP_LATENT_MIN_ARTICLES"), default=5, minimum=1)
+_GROUP_LATENT_MAX_GROUPS = _coerce_int(os.getenv("NEWS_GROUP_LATENT_MAX_GROUPS"), default=50, minimum=1)
+_TAG_LENS_PCA_MIN_ARTICLES = _coerce_int(os.getenv("NEWS_TAG_LENS_PCA_MIN_ARTICLES"), default=5, minimum=1)
+_TAG_LENS_PCA_MAX_TAGS = _coerce_int(os.getenv("NEWS_TAG_LENS_PCA_MAX_TAGS"), default=75, minimum=2)
+_TAG_MOMENTUM_HALF_LIFE_DAYS = _coerce_int(os.getenv("NEWS_TAG_MOMENTUM_HALF_LIFE_DAYS"), default=3, minimum=1)
+_TAG_MOMENTUM_RECENT_WINDOW_DAYS = _coerce_int(os.getenv("NEWS_TAG_MOMENTUM_RECENT_WINDOW_DAYS"), default=3, minimum=1)
+_TAG_MOMENTUM_BASELINE_WINDOW_DAYS = _coerce_int(os.getenv("NEWS_TAG_MOMENTUM_BASELINE_WINDOW_DAYS"), default=14, minimum=1)
+_TAG_MOMENTUM_MAX_TAGS = _coerce_int(os.getenv("NEWS_TAG_MOMENTUM_MAX_TAGS"), default=50, minimum=1)
 
 
 def _tag_count_distribution_label(tag_count: int) -> str:
@@ -1401,6 +1416,7 @@ def _lens_pca_from_records(
         article_points.append(
             {
                 "id": _clean_text(meta_row.get("id")),
+                "row_index": row_index,
                 "title": title,
                 "source": point_source,
                 "published_at": _clean_text(meta_row.get("published_at")),
@@ -1639,6 +1655,7 @@ def _lens_mds_from_records(
         article_points.append(
             {
                 "id": _clean_text(meta_row.get("id")),
+                "row_index": row_index,
                 "title": title,
                 "source": point_source,
                 "published_at": _clean_text(meta_row.get("published_at")),
@@ -2011,6 +2028,586 @@ def _lens_time_series_from_records(
         "summary": {
             "articles_with_time_and_lens_scores": article_count,
             "days": len(dates),
+        },
+    }
+
+
+def _source_label_for_record(record: dict[str, Any]) -> str:
+    source = record.get("source")
+    source_name = None
+    if isinstance(source, dict):
+        source_name = source.get("name") or source.get("id")
+    return _clean_text(source_name) or "Unknown"
+
+
+def _distribution_rows(
+    baseline_counter: Counter[str],
+    recent_counter: Counter[str],
+    label_key: str,
+    *,
+    limit: int = 25,
+) -> tuple[list[dict[str, Any]], float]:
+    baseline_total = sum(int(value) for value in baseline_counter.values())
+    recent_total = sum(int(value) for value in recent_counter.values())
+    labels = set(baseline_counter.keys()) | set(recent_counter.keys())
+    rows: list[dict[str, Any]] = []
+    total_variation = 0.0
+    for label in labels:
+        baseline_count = int(baseline_counter.get(label, 0))
+        recent_count = int(recent_counter.get(label, 0))
+        baseline_share = (baseline_count / baseline_total) if baseline_total else 0.0
+        recent_share = (recent_count / recent_total) if recent_total else 0.0
+        share_delta = recent_share - baseline_share
+        total_variation += abs(share_delta)
+        rows.append(
+            {
+                label_key: label,
+                "baseline_count": baseline_count,
+                "recent_count": recent_count,
+                "baseline_share": baseline_share,
+                "recent_share": recent_share,
+                "share_delta": share_delta,
+                "abs_share_delta": abs(share_delta),
+            }
+        )
+    rows.sort(key=lambda row: (float(row.get("abs_share_delta") or 0.0), int(row.get("recent_count") or 0)), reverse=True)
+    return rows[:limit], total_variation / 2.0
+
+
+def _drift_diagnostics_from_records(
+    records: list[dict[str, Any]],
+    lens_maxima: OrderedDict[str, float],
+) -> dict[str, Any]:
+    dated_records: list[tuple[str, dict[str, Any]]] = []
+    for record in records:
+        published_dt = _record_datetime(record)
+        if published_dt is None:
+            continue
+        dated_records.append((published_dt.date().isoformat(), record))
+
+    dates = sorted({day for day, _record in dated_records})
+    if len(dates) < 2:
+        return {
+            "status": "unavailable",
+            "reason": "Need at least two publication dates to compute drift diagnostics.",
+            "basis": "first_half_vs_second_half_by_publication_date",
+            "windows": {},
+            "lens_drift": [],
+            "source_distribution_drift": {"total_variation_distance": None, "rows": []},
+            "tag_distribution_drift": {"total_variation_distance": None, "rows": []},
+            "volume_drift": {},
+            "summary": {"dated_articles": len(dated_records), "days": len(dates)},
+        }
+
+    split_index = max(1, len(dates) // 2)
+    baseline_dates = set(dates[:split_index])
+    recent_dates = set(dates[split_index:])
+    if not recent_dates:
+        recent_dates = {dates[-1]}
+        baseline_dates = set(dates[:-1])
+
+    baseline_lens_values: dict[str, list[float]] = defaultdict(list)
+    recent_lens_values: dict[str, list[float]] = defaultdict(list)
+    baseline_source_counter: Counter[str] = Counter()
+    recent_source_counter: Counter[str] = Counter()
+    baseline_tag_counter: Counter[str] = Counter()
+    recent_tag_counter: Counter[str] = Counter()
+    baseline_daily_counter: Counter[str] = Counter()
+    recent_daily_counter: Counter[str] = Counter()
+
+    for day_key, record in dated_records:
+        is_recent = day_key in recent_dates
+        source_counter = recent_source_counter if is_recent else baseline_source_counter
+        tag_counter = recent_tag_counter if is_recent else baseline_tag_counter
+        lens_values = recent_lens_values if is_recent else baseline_lens_values
+        daily_counter = recent_daily_counter if is_recent else baseline_daily_counter
+
+        source_counter[_source_label_for_record(record)] += 1
+        daily_counter[day_key] += 1
+        for tag in {tag.strip() for tag in _tag_values_for_record(record) if tag.strip()}:
+            tag_counter[tag] += 1
+        for lens_name, lens_value in _record_lens_percentages(record, lens_maxima).items():
+            if isinstance(lens_name, str) and isinstance(lens_value, (int, float)) and math.isfinite(float(lens_value)):
+                lens_values[lens_name].append(float(lens_value))
+
+    discovered_lenses = set(baseline_lens_values.keys()) | set(recent_lens_values.keys())
+    ordered_lenses = [lens_name for lens_name in lens_maxima.keys() if lens_name in discovered_lenses]
+    ordered_lenses.extend(sorted(discovered_lenses - set(ordered_lenses)))
+    lens_rows: list[dict[str, Any]] = []
+    for lens_name in ordered_lenses:
+        baseline_values = baseline_lens_values.get(lens_name, [])
+        recent_values = recent_lens_values.get(lens_name, [])
+        baseline_mean = statistics.fmean(baseline_values) if baseline_values else None
+        recent_mean = statistics.fmean(recent_values) if recent_values else None
+        delta = (
+            float(recent_mean) - float(baseline_mean)
+            if isinstance(baseline_mean, (int, float)) and isinstance(recent_mean, (int, float))
+            else None
+        )
+        lens_rows.append(
+            {
+                "lens": lens_name,
+                "baseline_mean": baseline_mean,
+                "recent_mean": recent_mean,
+                "delta": delta,
+                "abs_delta": abs(delta) if isinstance(delta, (int, float)) else None,
+                "baseline_count": len(baseline_values),
+                "recent_count": len(recent_values),
+            }
+        )
+    lens_rows.sort(key=lambda row: float(row.get("abs_delta") or 0.0), reverse=True)
+
+    source_rows, source_tvd = _distribution_rows(baseline_source_counter, recent_source_counter, "source")
+    tag_rows, tag_tvd = _distribution_rows(baseline_tag_counter, recent_tag_counter, "tag")
+    baseline_daily_values = [int(count) for count in baseline_daily_counter.values()]
+    recent_daily_values = [int(count) for count in recent_daily_counter.values()]
+    baseline_daily_mean = statistics.fmean(baseline_daily_values) if baseline_daily_values else None
+    recent_daily_mean = statistics.fmean(recent_daily_values) if recent_daily_values else None
+    volume_delta = (
+        float(recent_daily_mean) - float(baseline_daily_mean)
+        if isinstance(baseline_daily_mean, (int, float)) and isinstance(recent_daily_mean, (int, float))
+        else None
+    )
+    max_abs_lens_delta = max((float(row.get("abs_delta") or 0.0) for row in lens_rows), default=0.0)
+    drift_score = max(source_tvd, tag_tvd, min(max_abs_lens_delta / 100.0, 1.0))
+    if drift_score >= 0.25:
+        severity = "high"
+    elif drift_score >= 0.10:
+        severity = "moderate"
+    else:
+        severity = "low"
+
+    return {
+        "status": "ok",
+        "reason": "",
+        "basis": "first_half_vs_second_half_by_publication_date",
+        "windows": {
+            "baseline": {
+                "start_date": min(baseline_dates) if baseline_dates else None,
+                "end_date": max(baseline_dates) if baseline_dates else None,
+                "days": len(baseline_dates),
+                "articles": sum(baseline_daily_counter.values()),
+            },
+            "recent": {
+                "start_date": min(recent_dates) if recent_dates else None,
+                "end_date": max(recent_dates) if recent_dates else None,
+                "days": len(recent_dates),
+                "articles": sum(recent_daily_counter.values()),
+            },
+        },
+        "lens_drift": lens_rows,
+        "source_distribution_drift": {
+            "total_variation_distance": source_tvd,
+            "rows": source_rows,
+        },
+        "tag_distribution_drift": {
+            "total_variation_distance": tag_tvd,
+            "rows": tag_rows,
+        },
+        "volume_drift": {
+            "baseline_daily_mean": baseline_daily_mean,
+            "recent_daily_mean": recent_daily_mean,
+            "delta_daily_mean": volume_delta,
+            "delta_ratio": (volume_delta / baseline_daily_mean) if baseline_daily_mean else None,
+        },
+        "summary": {
+            "dated_articles": len(dated_records),
+            "days": len(dates),
+            "baseline_articles": sum(baseline_daily_counter.values()),
+            "recent_articles": sum(recent_daily_counter.values()),
+            "max_abs_lens_delta": max_abs_lens_delta,
+            "source_total_variation_distance": source_tvd,
+            "tag_total_variation_distance": tag_tvd,
+            "drift_score": drift_score,
+            "severity": severity,
+        },
+    }
+
+
+def _tag_momentum_from_records(
+    records: list[dict[str, Any]],
+    *,
+    half_life_days: int = _TAG_MOMENTUM_HALF_LIFE_DAYS,
+    recent_window_days: int = _TAG_MOMENTUM_RECENT_WINDOW_DAYS,
+    baseline_window_days: int = _TAG_MOMENTUM_BASELINE_WINDOW_DAYS,
+    max_tags: int = _TAG_MOMENTUM_MAX_TAGS,
+) -> dict[str, Any]:
+    dated_records: list[tuple[dict[str, Any], datetime]] = []
+    for record in records:
+        published_dt = _record_datetime(record)
+        if published_dt is not None:
+            dated_records.append((record, published_dt))
+
+    config = {
+        "half_life_days": half_life_days,
+        "recent_window_days": recent_window_days,
+        "baseline_window_days": baseline_window_days,
+        "max_tags": max_tags,
+    }
+    if not dated_records:
+        return {
+            "status": "unavailable",
+            "reason": "No dated articles available for tag momentum.",
+            "basis": "exponential_decay_recent_vs_baseline",
+            "config": config,
+            "rows": [],
+            "daily_tag_counts": [],
+            "summary": {
+                "reference_date": None,
+                "dated_articles": 0,
+                "recent_articles": 0,
+                "baseline_articles": 0,
+                "tag_count": 0,
+                "returned_tag_count": 0,
+            },
+        }
+
+    reference_dt = max(dt for _record, dt in dated_records)
+    half_life_seconds = max(half_life_days * 86400.0, 1.0)
+    recent_seconds = recent_window_days * 86400.0
+    baseline_seconds = baseline_window_days * 86400.0
+    recent_article_count = 0
+    baseline_article_count = 0
+    tag_rows: dict[str, dict[str, Any]] = {}
+    daily_counter: Counter[tuple[str, str]] = Counter()
+
+    for record, published_dt in dated_records:
+        age_seconds = max((reference_dt - published_dt).total_seconds(), 0.0)
+        is_recent = age_seconds <= recent_seconds
+        is_baseline = recent_seconds < age_seconds <= baseline_seconds
+        if is_recent:
+            recent_article_count += 1
+        if is_baseline:
+            baseline_article_count += 1
+
+        decay_weight = 0.5 ** (age_seconds / half_life_seconds)
+        published_day = published_dt.date().isoformat()
+        source_label = _source_label_for_record(record)
+        for tag in {tag.strip() for tag in _tag_values_for_record(record) if tag.strip()}:
+            row = tag_rows.setdefault(
+                tag,
+                {
+                    "tag": tag,
+                    "total_count": 0,
+                    "recent_count": 0,
+                    "baseline_count": 0,
+                    "decayed_score": 0.0,
+                    "first_seen": published_day,
+                    "latest_seen": published_day,
+                    "source_counts": Counter(),
+                    "recent_source_counts": Counter(),
+                    "baseline_source_counts": Counter(),
+                },
+            )
+            row["total_count"] += 1
+            row["decayed_score"] += decay_weight
+            row["source_counts"][source_label] += 1
+            if is_recent:
+                row["recent_count"] += 1
+                row["recent_source_counts"][source_label] += 1
+            if is_baseline:
+                row["baseline_count"] += 1
+                row["baseline_source_counts"][source_label] += 1
+            if published_day < row["first_seen"]:
+                row["first_seen"] = published_day
+            if published_day > row["latest_seen"]:
+                row["latest_seen"] = published_day
+            daily_counter[(published_day, tag)] += 1
+
+    rows: list[dict[str, Any]] = []
+    for tag, row in tag_rows.items():
+        recent_count = int(row["recent_count"])
+        baseline_count = int(row["baseline_count"])
+        recent_share = (recent_count / recent_article_count) if recent_article_count else 0.0
+        baseline_share = (baseline_count / baseline_article_count) if baseline_article_count else 0.0
+        lift_ratio = (recent_share / baseline_share) if baseline_share > 0 else None
+        if baseline_count == 0 and recent_count > 0:
+            trend = "new"
+            lift_bonus = 1.5
+        elif isinstance(lift_ratio, (int, float)) and lift_ratio >= 2.0:
+            trend = "accelerating"
+            lift_bonus = min(math.log2(max(lift_ratio, 1.0)), 3.0)
+        elif recent_count > 0:
+            trend = "active"
+            lift_bonus = max(math.log2(max(lift_ratio or 1.0, 1.0)), 0.0)
+        else:
+            trend = "cooling"
+            lift_bonus = 0.0
+
+        days_since_latest = None
+        latest_dt = parse_datetime(row["latest_seen"])
+        if latest_dt is not None:
+            days_since_latest = max((reference_dt.date() - latest_dt.date()).days, 0)
+        decayed_score = float(row["decayed_score"])
+        recent_source_counts = row["recent_source_counts"] if isinstance(row["recent_source_counts"], Counter) else Counter()
+        baseline_source_counts = row["baseline_source_counts"] if isinstance(row["baseline_source_counts"], Counter) else Counter()
+        source_counts = row["source_counts"] if isinstance(row["source_counts"], Counter) else Counter()
+        top_recent_sources = [
+            {"source": source, "count": count}
+            for source, count in recent_source_counts.most_common(5)
+        ]
+        recent_top_source_count = top_recent_sources[0]["count"] if top_recent_sources else 0
+        rows.append(
+            {
+                "tag": tag,
+                "total_count": int(row["total_count"]),
+                "recent_count": recent_count,
+                "baseline_count": baseline_count,
+                "source_count": len(source_counts),
+                "recent_source_count": len(recent_source_counts),
+                "baseline_source_count": len(baseline_source_counts),
+                "top_recent_sources": top_recent_sources,
+                "recent_top_source_share": (recent_top_source_count / recent_count) if recent_count else None,
+                "recent_share": recent_share,
+                "baseline_share": baseline_share,
+                "lift_ratio": lift_ratio,
+                "decayed_score": decayed_score,
+                "momentum_score": decayed_score * (1.0 + lift_bonus),
+                "trend": trend,
+                "first_seen": row["first_seen"],
+                "latest_seen": row["latest_seen"],
+                "days_since_latest": days_since_latest,
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (
+            -float(row.get("momentum_score") or 0.0),
+            -int(row.get("recent_count") or 0),
+            str(row.get("tag") or "").lower(),
+        )
+    )
+    daily_rows = [
+        {"date": date_label, "tag": tag, "count": count}
+        for (date_label, tag), count in sorted(daily_counter.items(), key=lambda item: (item[0][0], item[0][1].lower()))
+    ]
+    return {
+        "status": "ok",
+        "reason": "",
+        "basis": "exponential_decay_recent_vs_baseline",
+        "config": config,
+        "rows": rows[:max_tags],
+        "daily_tag_counts": daily_rows,
+        "summary": {
+            "reference_date": reference_dt.date().isoformat(),
+            "dated_articles": len(dated_records),
+            "recent_articles": recent_article_count,
+            "baseline_articles": baseline_article_count,
+            "tag_count": len(rows),
+            "returned_tag_count": min(len(rows), max_tags),
+            "new_tag_count": sum(1 for row in rows if row.get("trend") == "new"),
+            "accelerating_tag_count": sum(1 for row in rows if row.get("trend") == "accelerating"),
+        },
+    }
+
+
+def _latent_space_stability_from_records(
+    article_lens_percentages: list[dict[str, float]],
+    source_labels: list[str],
+    article_meta_rows: list[dict[str, Any]],
+    full_pca: dict[str, Any],
+    preferred_lenses: list[str] | None = None,
+    *,
+    resamples: int = 12,
+    sample_fraction: float = 0.8,
+    seed: int = 42,
+) -> dict[str, Any]:
+    if str(full_pca.get("status") or "") != "ok":
+        return {
+            "status": "unavailable",
+            "reason": "Full PCA is unavailable; latent stability cannot be computed.",
+            "basis": "deterministic_subsample_pca",
+            "config": {"resamples": resamples, "sample_fraction": sample_fraction, "seed": seed},
+            "components": [],
+            "loading_stability": [],
+            "summary": {"stable_component_count": 0, "component_count": 0, "resamples_completed": 0},
+        }
+
+    if len(article_lens_percentages) < 6 or len(article_lens_percentages) != len(source_labels):
+        return {
+            "status": "unavailable",
+            "reason": "Need at least 6 aligned article lens rows for latent stability.",
+            "basis": "deterministic_subsample_pca",
+            "config": {"resamples": resamples, "sample_fraction": sample_fraction, "seed": seed},
+            "components": [],
+            "loading_stability": [],
+            "summary": {"stable_component_count": 0, "component_count": 0, "resamples_completed": 0},
+        }
+
+    full_loadings = full_pca.get("loadings")
+    if not isinstance(full_loadings, dict):
+        return {
+            "status": "unavailable",
+            "reason": "Full PCA loadings are missing.",
+            "basis": "deterministic_subsample_pca",
+            "config": {"resamples": resamples, "sample_fraction": sample_fraction, "seed": seed},
+            "components": [],
+            "loading_stability": [],
+            "summary": {"stable_component_count": 0, "component_count": 0, "resamples_completed": 0},
+        }
+
+    full_lenses = [str(lens) for lens in full_loadings.get("lenses", []) if isinstance(lens, str)]
+    full_components = [str(component) for component in full_loadings.get("components", []) if isinstance(component, str)]
+    full_matrix = full_loadings.get("matrix")
+    if not full_lenses or not full_components or not isinstance(full_matrix, list):
+        return {
+            "status": "unavailable",
+            "reason": "Full PCA loading matrix is incomplete.",
+            "basis": "deterministic_subsample_pca",
+            "config": {"resamples": resamples, "sample_fraction": sample_fraction, "seed": seed},
+            "components": [],
+            "loading_stability": [],
+            "summary": {"stable_component_count": 0, "component_count": 0, "resamples_completed": 0},
+        }
+
+    component_labels = full_components[: min(2, len(full_components))]
+    full_vectors: dict[str, list[float]] = {}
+    for component_index, component_label in enumerate(component_labels):
+        row = full_matrix[component_index] if component_index < len(full_matrix) and isinstance(full_matrix[component_index], list) else []
+        vector = []
+        for value in row[: len(full_lenses)]:
+            coerced = _coerce_float(value)
+            vector.append(float(coerced) if coerced is not None else 0.0)
+        if len(vector) == len(full_lenses):
+            full_vectors[component_label] = vector
+
+    if not full_vectors:
+        return {
+            "status": "unavailable",
+            "reason": "No comparable full PCA component vectors were available.",
+            "basis": "deterministic_subsample_pca",
+            "config": {"resamples": resamples, "sample_fraction": sample_fraction, "seed": seed},
+            "components": [],
+            "loading_stability": [],
+            "summary": {"stable_component_count": 0, "component_count": 0, "resamples_completed": 0},
+        }
+
+    sample_size = max(4, min(len(article_lens_percentages) - 1, int(round(len(article_lens_percentages) * sample_fraction))))
+    component_cosines: dict[str, list[float]] = defaultdict(list)
+    component_explained: dict[str, list[float]] = defaultdict(list)
+    loading_samples: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    completed = 0
+
+    for resample_index in range(max(1, resamples)):
+        rng = random.Random(seed + resample_index)
+        sample_indexes = sorted(rng.sample(range(len(article_lens_percentages)), sample_size))
+        sample_lens_rows = [article_lens_percentages[index] for index in sample_indexes]
+        sample_sources = [source_labels[index] for index in sample_indexes]
+        sample_meta = [
+            article_meta_rows[index] if index < len(article_meta_rows) and isinstance(article_meta_rows[index], dict) else {}
+            for index in sample_indexes
+        ]
+        sample_pca = _lens_pca_from_records(
+            sample_lens_rows,
+            sample_sources,
+            article_meta_rows=sample_meta,
+            preferred_lenses=preferred_lenses,
+            max_components=2,
+        )
+        if str(sample_pca.get("status") or "") != "ok":
+            continue
+        sample_loadings = sample_pca.get("loadings")
+        if not isinstance(sample_loadings, dict):
+            continue
+        sample_lenses = [str(lens) for lens in sample_loadings.get("lenses", []) if isinstance(lens, str)]
+        sample_matrix = sample_loadings.get("matrix")
+        if not sample_lenses or not isinstance(sample_matrix, list):
+            continue
+        sample_lens_index = {lens: idx for idx, lens in enumerate(sample_lenses)}
+        explained_by_component = {
+            str(row.get("component") or ""): _coerce_float(row.get("explained_variance_ratio"))
+            for row in sample_pca.get("explained_variance", [])
+            if isinstance(row, dict)
+        }
+        completed += 1
+        for component_index, component_label in enumerate(component_labels):
+            if component_label not in full_vectors or component_index >= len(sample_matrix) or not isinstance(sample_matrix[component_index], list):
+                continue
+            sample_vector: list[float] = []
+            for lens_name in full_lenses:
+                sample_index = sample_lens_index.get(lens_name)
+                value = sample_matrix[component_index][sample_index] if sample_index is not None and sample_index < len(sample_matrix[component_index]) else 0.0
+                coerced = _coerce_float(value)
+                sample_vector.append(float(coerced) if coerced is not None else 0.0)
+            full_vector = full_vectors[component_label]
+            dot = sum(a * b for a, b in zip(full_vector, sample_vector))
+            if dot < 0:
+                sample_vector = [-value for value in sample_vector]
+                dot = -dot
+            full_norm = math.sqrt(sum(value * value for value in full_vector))
+            sample_norm = math.sqrt(sum(value * value for value in sample_vector))
+            cosine = dot / (full_norm * sample_norm) if full_norm > 0 and sample_norm > 0 else None
+            if cosine is not None:
+                component_cosines[component_label].append(cosine)
+            explained = explained_by_component.get(component_label)
+            if explained is not None:
+                component_explained[component_label].append(float(explained))
+            for lens_name, loading in zip(full_lenses, sample_vector):
+                loading_samples[lens_name][component_label].append(float(loading))
+
+    component_rows: list[dict[str, Any]] = []
+    stable_count = 0
+    for component_label in component_labels:
+        cosines = component_cosines.get(component_label, [])
+        explained_values = component_explained.get(component_label, [])
+        mean_cosine = statistics.fmean(cosines) if cosines else None
+        min_cosine = min(cosines) if cosines else None
+        explained_mean = statistics.fmean(explained_values) if explained_values else None
+        explained_stddev = statistics.pstdev(explained_values) if len(explained_values) > 1 else 0.0 if explained_values else None
+        stable = bool(mean_cosine is not None and mean_cosine >= 0.9 and (min_cosine is None or min_cosine >= 0.75))
+        if stable:
+            stable_count += 1
+        component_rows.append(
+            {
+                "component": component_label,
+                "resamples": len(cosines),
+                "mean_cosine_similarity": mean_cosine,
+                "min_cosine_similarity": min_cosine,
+                "explained_variance_mean": explained_mean,
+                "explained_variance_stddev": explained_stddev,
+                "stable": stable,
+            }
+        )
+
+    loading_rows: list[dict[str, Any]] = []
+    for lens_name in full_lenses:
+        row: dict[str, Any] = {"lens": lens_name}
+        max_stddev = 0.0
+        for component_label in component_labels:
+            samples = loading_samples[lens_name].get(component_label, [])
+            mean_value = statistics.fmean(samples) if samples else None
+            stddev_value = statistics.pstdev(samples) if len(samples) > 1 else 0.0 if samples else None
+            row[f"{component_label.lower()}_loading_mean"] = mean_value
+            row[f"{component_label.lower()}_loading_stddev"] = stddev_value
+            if isinstance(stddev_value, (int, float)):
+                max_stddev = max(max_stddev, float(stddev_value))
+        row["max_loading_stddev"] = max_stddev
+        loading_rows.append(row)
+    loading_rows.sort(key=lambda row: float(row.get("max_loading_stddev") or 0.0), reverse=True)
+
+    return {
+        "status": "ok" if completed else "unavailable",
+        "reason": "" if completed else "No PCA resamples completed successfully.",
+        "basis": "deterministic_subsample_pca",
+        "config": {
+            "resamples": resamples,
+            "sample_fraction": sample_fraction,
+            "sample_size": sample_size,
+            "seed": seed,
+        },
+        "components": component_rows,
+        "loading_stability": loading_rows,
+        "summary": {
+            "stable_component_count": stable_count,
+            "component_count": len(component_rows),
+            "resamples_completed": completed,
+            "mean_component_similarity": statistics.fmean(
+                [float(row["mean_cosine_similarity"]) for row in component_rows if isinstance(row.get("mean_cosine_similarity"), (int, float))]
+            )
+            if any(isinstance(row.get("mean_cosine_similarity"), (int, float)) for row in component_rows)
+            else None,
+            "most_unstable_lens": loading_rows[0].get("lens") if loading_rows else None,
+            "max_loading_stddev": loading_rows[0].get("max_loading_stddev") if loading_rows else None,
         },
     }
 
@@ -2800,6 +3397,902 @@ def _topic_memberships_from_record(
     return ["__untagged__"]
 
 
+def _tag_memberships_from_record(
+    record: dict[str, Any],
+    tag_display_labels: dict[str, str],
+) -> list[str]:
+    tag_values = _unique_case_insensitive(_values_to_strings(record.get("ai_tags")))
+    tag_keys: list[str] = []
+    for tag_value in tag_values:
+        tag_text = tag_value.strip()
+        if not tag_text:
+            continue
+        tag_key = tag_text.lower()
+        if tag_key not in tag_display_labels:
+            tag_display_labels[tag_key] = tag_text
+        tag_keys.append(tag_key)
+
+    if tag_keys:
+        return tag_keys
+
+    tag_display_labels.setdefault("__untagged__", "Untagged")
+    return ["__untagged__"]
+
+
+def _mean_or_none(values: list[float]) -> float | None:
+    return (sum(values) / len(values)) if values else None
+
+
+def _euclidean_distance(row_a: dict[str, Any], row_b: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    total = 0.0
+    used = 0
+    for key in keys:
+        value_a = _coerce_float(row_a.get(key))
+        value_b = _coerce_float(row_b.get(key))
+        if value_a is None or value_b is None:
+            continue
+        total += (value_a - value_b) * (value_a - value_b)
+        used += 1
+    if used == 0:
+        return None
+    return math.sqrt(total)
+
+
+def _centroid_dispersion(points: list[dict[str, Any]], centroid: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    distances = [
+        distance
+        for distance in (_euclidean_distance(point, centroid, keys) for point in points)
+        if isinstance(distance, (int, float))
+    ]
+    return _mean_or_none([float(distance) for distance in distances])
+
+
+def _group_latent_space_from_records(
+    article_lens_percentages: list[dict[str, float]],
+    source_labels: list[str],
+    topic_keys_for_lens_rows: list[list[str]],
+    topic_display_labels: dict[str, str],
+    tag_keys_for_lens_rows: list[list[str]],
+    tag_display_labels: dict[str, str],
+    article_meta_rows: list[dict[str, Any]],
+    lens_pca: dict[str, Any],
+    lens_mds: dict[str, Any],
+    preferred_lenses: list[str] | None = None,
+    min_articles_per_group: int = _GROUP_LATENT_MIN_ARTICLES,
+    max_groups_per_type: int = _GROUP_LATENT_MAX_GROUPS,
+) -> dict[str, Any]:
+    base_payload: dict[str, Any] = {
+        "status": "unavailable",
+        "reason": "",
+        "basis": "global_lens_pca_mds",
+        "config": {
+            "min_articles_per_group": min_articles_per_group,
+            "max_groups_per_type": max_groups_per_type,
+            "group_types": ["source", "topic", "tag"],
+            "topic_basis": "topic_tags",
+            "tag_basis": "ai_tags",
+        },
+        "groups": {"source": [], "topic": [], "tag": []},
+        "clusters": {"source": [], "topic": [], "tag": []},
+        "summary": {
+            "group_counts": {"source": 0, "topic": 0, "tag": 0},
+            "analyzed_group_counts": {"source": 0, "topic": 0, "tag": 0},
+            "low_sample_group_counts": {"source": 0, "topic": 0, "tag": 0},
+            "cluster_counts": {"source": 0, "topic": 0, "tag": 0},
+            "singleton_cluster_counts": {"source": 0, "topic": 0, "tag": 0},
+            "total_groups": 0,
+            "total_analyzed_groups": 0,
+            "total_low_sample_groups": 0,
+            "total_clusters": 0,
+        },
+    }
+    if (
+        not article_lens_percentages
+        or len(article_lens_percentages) != len(source_labels)
+        or len(article_lens_percentages) != len(topic_keys_for_lens_rows)
+        or len(article_lens_percentages) != len(tag_keys_for_lens_rows)
+        or len(article_lens_percentages) != len(article_meta_rows)
+    ):
+        base_payload["reason"] = "Need aligned article lens, source, topic, tag, and metadata rows."
+        return base_payload
+
+    if not isinstance(lens_pca, dict) or str(lens_pca.get("status") or "") != "ok":
+        base_payload["reason"] = "Global PCA is unavailable; group latent space cannot be computed."
+        return base_payload
+
+    pca_points = lens_pca.get("article_points") if isinstance(lens_pca.get("article_points"), list) else []
+    if not pca_points:
+        base_payload["reason"] = "Global PCA has no article points."
+        return base_payload
+
+    mds_points = lens_mds.get("article_points") if isinstance(lens_mds, dict) and isinstance(lens_mds.get("article_points"), list) else []
+    pca_by_index: dict[int, dict[str, Any]] = {}
+    for offset, point in enumerate(pca_points):
+        if not isinstance(point, dict):
+            continue
+        row_index_raw = point.get("row_index")
+        try:
+            row_index = int(row_index_raw)
+        except (TypeError, ValueError):
+            row_index = offset
+        pca_by_index[row_index] = point
+
+    mds_by_index: dict[int, dict[str, Any]] = {}
+    for offset, point in enumerate(mds_points):
+        if not isinstance(point, dict):
+            continue
+        row_index_raw = point.get("row_index")
+        try:
+            row_index = int(row_index_raw)
+        except (TypeError, ValueError):
+            row_index = offset
+        mds_by_index[row_index] = point
+
+    discovered_lenses = {
+        lens_name
+        for row in article_lens_percentages
+        for lens_name, value in row.items()
+        if isinstance(lens_name, str) and isinstance(value, (int, float)) and math.isfinite(float(value))
+    }
+    lens_names = _ordered_lenses(preferred_lenses or [], discovered_lenses)
+    corpus_lens_means: dict[str, float] = {}
+    for lens_name in lens_names:
+        values = [
+            float(row[lens_name])
+            for row in article_lens_percentages
+            if isinstance(row.get(lens_name), (int, float)) and math.isfinite(float(row[lens_name]))
+        ]
+        if values:
+            corpus_lens_means[lens_name] = sum(values) / len(values)
+
+    source_display_labels: dict[str, str] = {}
+    buckets: dict[str, dict[str, list[int]]] = {
+        "source": defaultdict(list),
+        "topic": defaultdict(list),
+        "tag": defaultdict(list),
+    }
+    for row_index, source_label in enumerate(source_labels):
+        source_text = str(source_label or "Unknown").strip() or "Unknown"
+        source_key = source_text.lower()
+        source_display_labels.setdefault(source_key, source_text)
+        buckets["source"][source_key].append(row_index)
+
+        topic_keys = topic_keys_for_lens_rows[row_index] if row_index < len(topic_keys_for_lens_rows) else []
+        for topic_key in list(dict.fromkeys(topic_keys or ["__untagged__"])):
+            normalized_key = str(topic_key or "__untagged__").strip().lower() or "__untagged__"
+            buckets["topic"][normalized_key].append(row_index)
+
+        tag_keys = tag_keys_for_lens_rows[row_index] if row_index < len(tag_keys_for_lens_rows) else []
+        for tag_key in list(dict.fromkeys(tag_keys or ["__untagged__"])):
+            normalized_key = str(tag_key or "__untagged__").strip().lower() or "__untagged__"
+            buckets["tag"][normalized_key].append(row_index)
+
+    display_maps = {
+        "source": source_display_labels,
+        "topic": {**topic_display_labels, "__untagged__": "Untagged"},
+        "tag": {**tag_display_labels, "__untagged__": "Untagged"},
+    }
+
+    def build_group_row(group_type: str, group_key: str, indexes: list[int]) -> dict[str, Any]:
+        unique_indexes = sorted(set(indexes))
+        pca_group_points = [pca_by_index[index] for index in unique_indexes if index in pca_by_index]
+        mds_group_points = [mds_by_index[index] for index in unique_indexes if index in mds_by_index]
+        source_counts = Counter(source_labels[index] for index in unique_indexes if index < len(source_labels))
+        topic_counts: Counter[str] = Counter()
+        tag_counts: Counter[str] = Counter()
+        published_dates: list[str] = []
+        lens_deviation_rows: list[dict[str, Any]] = []
+
+        for index in unique_indexes:
+            if index < len(topic_keys_for_lens_rows):
+                for topic_key in topic_keys_for_lens_rows[index] or ["__untagged__"]:
+                    topic_counts[display_maps["topic"].get(topic_key, topic_key)] += 1
+            if index < len(tag_keys_for_lens_rows):
+                for tag_key in tag_keys_for_lens_rows[index] or ["__untagged__"]:
+                    tag_counts[display_maps["tag"].get(tag_key, tag_key)] += 1
+            if index < len(article_meta_rows):
+                parsed = parse_datetime(article_meta_rows[index].get("published_at"))
+                if parsed is not None:
+                    published_dates.append(parsed.date().isoformat())
+
+        for lens_name in lens_names:
+            values = [
+                float(article_lens_percentages[index][lens_name])
+                for index in unique_indexes
+                if index < len(article_lens_percentages)
+                and isinstance(article_lens_percentages[index].get(lens_name), (int, float))
+                and math.isfinite(float(article_lens_percentages[index][lens_name]))
+            ]
+            corpus_mean = corpus_lens_means.get(lens_name)
+            if not values or corpus_mean is None:
+                continue
+            group_mean = sum(values) / len(values)
+            delta = group_mean - corpus_mean
+            lens_deviation_rows.append(
+                {
+                    "lens": lens_name,
+                    "mean_percent": group_mean,
+                    "corpus_mean_percent": corpus_mean,
+                    "delta": delta,
+                    "abs_delta": abs(delta),
+                    "n": len(values),
+                }
+            )
+        lens_deviation_rows.sort(key=lambda row: (-float(row.get("abs_delta") or 0.0), str(row.get("lens", "")).lower()))
+
+        pca_centroid = {
+            "pc1": _mean_or_none([float(point["pc1"]) for point in pca_group_points if isinstance(point.get("pc1"), (int, float))]),
+            "pc2": _mean_or_none([float(point["pc2"]) for point in pca_group_points if isinstance(point.get("pc2"), (int, float))]),
+            "pc3": _mean_or_none([float(point["pc3"]) for point in pca_group_points if isinstance(point.get("pc3"), (int, float))]),
+        }
+        mds_centroid = {
+            "mds1": _mean_or_none([float(point["mds1"]) for point in mds_group_points if isinstance(point.get("mds1"), (int, float))]),
+            "mds2": _mean_or_none([float(point["mds2"]) for point in mds_group_points if isinstance(point.get("mds2"), (int, float))]),
+            "mds3": _mean_or_none([float(point["mds3"]) for point in mds_group_points if isinstance(point.get("mds3"), (int, float))]),
+        }
+        status = "ok" if len(unique_indexes) >= min_articles_per_group and pca_group_points else "low_sample"
+        reason = "" if status == "ok" else f"Need at least {min_articles_per_group} articles with PCA coordinates."
+        display_label = display_maps[group_type].get(group_key, group_key)
+        return {
+            "group_type": group_type,
+            "group": display_label,
+            "group_key": group_key,
+            "status": status,
+            "reason": reason,
+            "n_articles": len(unique_indexes),
+            "n_pca_articles": len(pca_group_points),
+            "n_mds_articles": len(mds_group_points),
+            "n_sources": len(source_counts),
+            "date_start": min(published_dates) if published_dates else None,
+            "date_end": max(published_dates) if published_dates else None,
+            **pca_centroid,
+            **mds_centroid,
+            "dispersion_pca": _centroid_dispersion(pca_group_points, pca_centroid, ("pc1", "pc2", "pc3")),
+            "dispersion_mds": _centroid_dispersion(mds_group_points, mds_centroid, ("mds1", "mds2", "mds3")),
+            "source_counts": dict(source_counts.most_common()),
+            "topic_counts": dict(topic_counts.most_common()),
+            "tag_counts": dict(tag_counts.most_common()),
+            "top_lens_deviations": lens_deviation_rows[:8],
+            "nearest_groups": [],
+            "farthest_groups": [],
+        }
+
+    all_group_rows: dict[str, list[dict[str, Any]]] = {}
+    for group_type, group_buckets in buckets.items():
+        rows = [build_group_row(group_type, group_key, indexes) for group_key, indexes in group_buckets.items()]
+        rows.sort(key=lambda row: (-int(row.get("n_articles") or 0), str(row.get("group", "")).lower()))
+        all_group_rows[group_type] = rows
+
+    for group_type, rows in all_group_rows.items():
+        for row in rows:
+            distances: list[dict[str, Any]] = []
+            for other in rows:
+                if other is row:
+                    continue
+                distance = _euclidean_distance(row, other, ("pc1", "pc2", "pc3"))
+                if distance is None:
+                    continue
+                distances.append(
+                    {
+                        "group": other.get("group"),
+                        "group_key": other.get("group_key"),
+                        "distance_pca": distance,
+                    }
+                )
+            distances.sort(key=lambda item: (float(item.get("distance_pca") or 0.0), str(item.get("group", "")).lower()))
+            row["nearest_groups"] = distances[:5]
+            row["farthest_groups"] = list(reversed(distances[-5:]))
+
+    group_clusters: dict[str, list[dict[str, Any]]] = {"source": [], "topic": [], "tag": []}
+    for group_type, rows in all_group_rows.items():
+        cluster_keys = ("pc1", "pc2", "pc3") if any(isinstance(row.get("pc3"), (int, float)) for row in rows) else ("pc1", "pc2")
+        clusterable_rows = [
+            row
+            for row in rows
+            if str(row.get("status") or "") == "ok"
+            and all(isinstance(row.get(key), (int, float)) for key in cluster_keys)
+        ]
+        nearest_distances = [
+            float(row["nearest_groups"][0]["distance_pca"])
+            for row in clusterable_rows
+            if isinstance(row.get("nearest_groups"), list)
+            and row["nearest_groups"]
+            and isinstance(row["nearest_groups"][0], dict)
+            and isinstance(row["nearest_groups"][0].get("distance_pca"), (int, float))
+        ]
+        if len(clusterable_rows) < 2 or not nearest_distances:
+            continue
+
+        clustering_threshold = max(float(statistics.median(nearest_distances)) * 1.5, 1e-9)
+        parents = list(range(len(clusterable_rows)))
+
+        def _find(index: int) -> int:
+            while parents[index] != index:
+                parents[index] = parents[parents[index]]
+                index = parents[index]
+            return index
+
+        def _union(left: int, right: int) -> None:
+            left_root = _find(left)
+            right_root = _find(right)
+            if left_root != right_root:
+                parents[right_root] = left_root
+
+        for left_index, left_row in enumerate(clusterable_rows):
+            for right_index in range(left_index + 1, len(clusterable_rows)):
+                distance = _euclidean_distance(left_row, clusterable_rows[right_index], cluster_keys)
+                if distance is not None and distance <= clustering_threshold:
+                    _union(left_index, right_index)
+
+        cluster_members: dict[int, list[int]] = defaultdict(list)
+        for row_index in range(len(clusterable_rows)):
+            cluster_members[_find(row_index)].append(row_index)
+
+        raw_clusters: list[dict[str, Any]] = []
+        for member_indexes in cluster_members.values():
+            member_rows = [clusterable_rows[index] for index in member_indexes]
+            centroid = {
+                "pc1": _mean_or_none([float(row["pc1"]) for row in member_rows if isinstance(row.get("pc1"), (int, float))]),
+                "pc2": _mean_or_none([float(row["pc2"]) for row in member_rows if isinstance(row.get("pc2"), (int, float))]),
+                "pc3": _mean_or_none([float(row["pc3"]) for row in member_rows if isinstance(row.get("pc3"), (int, float))]),
+            }
+            article_total = sum(int(row.get("n_articles") or 0) for row in member_rows)
+            source_counts: Counter[str] = Counter()
+            lens_delta_rows: list[dict[str, Any]] = []
+            for row in member_rows:
+                for source, count in (row.get("source_counts") if isinstance(row.get("source_counts"), dict) else {}).items():
+                    source_counts[str(source)] += int(count or 0)
+                for lens_row in row.get("top_lens_deviations") if isinstance(row.get("top_lens_deviations"), list) else []:
+                    if isinstance(lens_row, dict) and isinstance(lens_row.get("delta"), (int, float)):
+                        lens_delta_rows.append(
+                            {
+                                "lens": lens_row.get("lens"),
+                                "delta": float(lens_row.get("delta") or 0.0),
+                                "abs_delta": abs(float(lens_row.get("delta") or 0.0)),
+                            }
+                        )
+            lens_delta_rows.sort(key=lambda row: (-float(row.get("abs_delta") or 0.0), str(row.get("lens") or "").lower()))
+
+            def _distance_to_centroid(row: dict[str, Any]) -> float:
+                return float(_euclidean_distance(row, centroid, cluster_keys) or 0.0)
+
+            representative_rows = sorted(
+                member_rows,
+                key=lambda row: (_distance_to_centroid(row), -int(row.get("n_articles") or 0), str(row.get("group") or "").lower()),
+            )
+            raw_clusters.append(
+                {
+                    "member_rows": representative_rows,
+                    "n_groups": len(member_rows),
+                    "n_articles": article_total,
+                    "n_sources": len(source_counts),
+                    "source_counts": dict(source_counts.most_common()),
+                    "defining_lens_deviations": lens_delta_rows[:5],
+                    "clustering_threshold_pca": clustering_threshold,
+                    "clustering_dimensions": list(cluster_keys),
+                    **centroid,
+                }
+            )
+
+        raw_clusters.sort(
+            key=lambda row: (
+                -int(row.get("n_groups") or 0),
+                -int(row.get("n_articles") or 0),
+                str(row.get("member_rows", [{}])[0].get("group") or "").lower(),
+            )
+        )
+        for cluster_index, raw_cluster in enumerate(raw_clusters, start=1):
+            representative_rows = raw_cluster.get("member_rows") if isinstance(raw_cluster.get("member_rows"), list) else []
+            cluster_id = f"{group_type}-cluster-{cluster_index}"
+            cluster_label = ", ".join(str(row.get("group") or "Unknown") for row in representative_rows[:3])
+            cluster_row = {
+                "cluster_id": cluster_id,
+                "cluster": cluster_index,
+                "group_type": group_type,
+                "label": cluster_label or f"{group_type.title()} Cluster {cluster_index}",
+                "n_groups": raw_cluster.get("n_groups"),
+                "n_articles": raw_cluster.get("n_articles"),
+                "n_sources": raw_cluster.get("n_sources"),
+                "source_counts": raw_cluster.get("source_counts", {}),
+                "representative_groups": [
+                    {
+                        "group_key": row.get("group_key"),
+                        "group": row.get("group"),
+                        "n_articles": row.get("n_articles"),
+                    }
+                    for row in representative_rows[:6]
+                ],
+                "defining_lens_deviations": raw_cluster.get("defining_lens_deviations", []),
+                "clustering_threshold_pca": raw_cluster.get("clustering_threshold_pca"),
+                "clustering_dimensions": raw_cluster.get("clustering_dimensions", []),
+                "pc1": raw_cluster.get("pc1"),
+                "pc2": raw_cluster.get("pc2"),
+                "pc3": raw_cluster.get("pc3"),
+            }
+            group_clusters[group_type].append(cluster_row)
+            for row in representative_rows:
+                row["cluster_id"] = cluster_id
+                row["cluster"] = cluster_index
+                row["cluster_label"] = cluster_row["label"]
+                row["cluster_distance_pca"] = _euclidean_distance(row, cluster_row, cluster_keys)
+
+    group_counts = {group_type: len(rows) for group_type, rows in all_group_rows.items()}
+    analyzed_counts = {
+        group_type: sum(1 for row in rows if str(row.get("status") or "") == "ok")
+        for group_type, rows in all_group_rows.items()
+    }
+    low_sample_counts = {
+        group_type: sum(1 for row in rows if str(row.get("status") or "") != "ok")
+        for group_type, rows in all_group_rows.items()
+    }
+    cluster_counts = {group_type: len(rows) for group_type, rows in group_clusters.items()}
+    singleton_cluster_counts = {
+        group_type: sum(1 for row in rows if int(row.get("n_groups") or 0) == 1)
+        for group_type, rows in group_clusters.items()
+    }
+    base_payload["status"] = "ok"
+    base_payload["reason"] = ""
+    base_payload["groups"] = {
+        group_type: rows[:max_groups_per_type]
+        for group_type, rows in all_group_rows.items()
+    }
+    base_payload["clusters"] = {
+        group_type: rows[:max_groups_per_type]
+        for group_type, rows in group_clusters.items()
+    }
+    base_payload["summary"] = {
+        "group_counts": group_counts,
+        "analyzed_group_counts": analyzed_counts,
+        "low_sample_group_counts": low_sample_counts,
+        "cluster_counts": cluster_counts,
+        "singleton_cluster_counts": singleton_cluster_counts,
+        "total_groups": sum(group_counts.values()),
+        "total_analyzed_groups": sum(analyzed_counts.values()),
+        "total_low_sample_groups": sum(low_sample_counts.values()),
+        "total_clusters": sum(cluster_counts.values()),
+    }
+    return base_payload
+
+
+def _tag_lens_pca_from_records(
+    article_lens_percentages: list[dict[str, float]],
+    source_labels: list[str],
+    tag_keys_for_lens_rows: list[list[str]],
+    tag_display_labels: dict[str, str],
+    article_meta_rows: list[dict[str, Any]],
+    preferred_lenses: list[str] | None = None,
+    *,
+    min_articles_per_tag: int = _TAG_LENS_PCA_MIN_ARTICLES,
+    max_tags: int = _TAG_LENS_PCA_MAX_TAGS,
+) -> dict[str, Any]:
+    base_payload: dict[str, Any] = {
+        "status": "unavailable",
+        "reason": "",
+        "basis": "tag_mean_lens_profile_pca",
+        "config": {
+            "min_articles_per_tag": min_articles_per_tag,
+            "max_tags": max_tags,
+            "tag_basis": "ai_tags",
+            "multi_tag_policy": "duplicate_per_tag",
+        },
+        "n_tags": 0,
+        "n_lenses": 0,
+        "lenses": [],
+        "components": [],
+        "explained_variance": [],
+        "loadings": {"lenses": [], "components": [], "matrix": []},
+        "component_summary": [],
+        "variance_drivers": [],
+        "component_extremes": [],
+        "clusters": [],
+        "tag_points": [],
+        "tag_profiles": [],
+        "summary": {
+            "total_tag_count": 0,
+            "eligible_tag_count": 0,
+            "low_sample_tag_count": 0,
+            "included_tag_count": 0,
+            "near_minimum_tag_count": 0,
+            "cluster_count": 0,
+            "singleton_cluster_count": 0,
+            "clustering_threshold_pca": None,
+            "median_articles_per_tag": None,
+            "max_articles_per_tag": None,
+            "pc1_pc2_cumulative_variance_ratio": None,
+            "pc1_pc3_cumulative_variance_ratio": None,
+        },
+    }
+    if (
+        not article_lens_percentages
+        or len(article_lens_percentages) != len(tag_keys_for_lens_rows)
+        or len(article_lens_percentages) != len(source_labels)
+    ):
+        base_payload["reason"] = "Need aligned article lens rows, tag memberships, and source labels."
+        return base_payload
+
+    tag_indexes: dict[str, list[int]] = defaultdict(list)
+    for row_index, tag_keys in enumerate(tag_keys_for_lens_rows):
+        for tag_key in tag_keys:
+            tag_indexes[str(tag_key)].append(row_index)
+
+    discovered_lenses = {
+        lens_name
+        for row in article_lens_percentages
+        for lens_name, value in row.items()
+        if isinstance(lens_name, str) and isinstance(value, (int, float)) and math.isfinite(float(value))
+    }
+    if preferred_lenses:
+        lens_names = [lens_name for lens_name in preferred_lenses if lens_name in discovered_lenses]
+        lens_names.extend(sorted(discovered_lenses - set(lens_names)))
+    else:
+        lens_names = sorted(discovered_lenses)
+
+    base_payload["summary"]["total_tag_count"] = len(tag_indexes)
+    base_payload["lenses"] = lens_names
+    base_payload["n_lenses"] = len(lens_names)
+    if not lens_names:
+        base_payload["reason"] = "No finite lens scores available for tag PCA."
+        return base_payload
+
+    profiles: list[dict[str, float]] = []
+    labels: list[str] = []
+    tag_meta_rows: list[dict[str, Any]] = []
+    low_sample_count = 0
+    for tag_key, indexes in sorted(
+        tag_indexes.items(),
+        key=lambda item: (-len(item[1]), tag_display_labels.get(item[0], item[0]).lower()),
+    ):
+        tag_label = tag_display_labels.get(tag_key, tag_key)
+        n_articles = len(indexes)
+        if n_articles < min_articles_per_tag:
+            low_sample_count += 1
+            continue
+        lens_means: dict[str, float] = {}
+        for lens_name in lens_names:
+            values = [
+                float(article_lens_percentages[index][lens_name])
+                for index in indexes
+                if isinstance(article_lens_percentages[index].get(lens_name), (int, float))
+                and math.isfinite(float(article_lens_percentages[index][lens_name]))
+            ]
+            if values:
+                lens_means[lens_name] = sum(values) / len(values)
+        if not lens_means:
+            continue
+        source_counts = Counter(source_labels[index] for index in indexes)
+        date_values = [
+            _clean_text(article_meta_rows[index].get("published_at"))
+            for index in indexes
+            if index < len(article_meta_rows) and isinstance(article_meta_rows[index], dict)
+        ]
+        date_values = [value for value in date_values if value]
+        profiles.append(lens_means)
+        labels.append(tag_label)
+        tag_meta_rows.append(
+            {
+                "id": tag_key,
+                "title": tag_label,
+                "source": tag_label,
+                "published_at": max(date_values) if date_values else None,
+                "tag_key": tag_key,
+                "tag": tag_label,
+                "n_articles": n_articles,
+                "n_sources": len(source_counts),
+                "source_counts": dict(source_counts.most_common()),
+                "lens_means": lens_means,
+                "date_start": min(date_values) if date_values else None,
+                "date_end": max(date_values) if date_values else None,
+            }
+        )
+        if len(profiles) >= max_tags:
+            break
+
+    base_payload["summary"]["low_sample_tag_count"] = low_sample_count
+    base_payload["summary"]["eligible_tag_count"] = len(profiles)
+    base_payload["summary"]["included_tag_count"] = len(profiles)
+    base_payload["tag_profiles"] = tag_meta_rows
+    if len(profiles) < 2:
+        base_payload["reason"] = "Need at least 2 tags meeting the minimum article threshold for tag PCA."
+        return base_payload
+
+    pca_payload = _lens_pca_from_records(
+        profiles,
+        labels,
+        article_meta_rows=tag_meta_rows,
+        preferred_lenses=lens_names,
+        max_components=_PCA_MAX_COMPONENTS,
+    )
+    if str(pca_payload.get("status") or "") != "ok":
+        base_payload["reason"] = str(pca_payload.get("reason") or "Tag PCA unavailable.")
+        base_payload["explained_variance"] = pca_payload.get("explained_variance", [])
+        base_payload["loadings"] = pca_payload.get("loadings", base_payload["loadings"])
+        return base_payload
+
+    raw_points = pca_payload.get("article_points") if isinstance(pca_payload.get("article_points"), list) else []
+    tag_points: list[dict[str, Any]] = []
+    for raw_point in raw_points:
+        if not isinstance(raw_point, dict):
+            continue
+        row_index = _coerce_int(raw_point.get("row_index"), default=-1, minimum=-1)
+        meta_row = tag_meta_rows[row_index] if 0 <= row_index < len(tag_meta_rows) else {}
+        lens_means = meta_row.get("lens_means") if isinstance(meta_row.get("lens_means"), dict) else {}
+        lens_mean_rows = [
+            {"lens": str(lens_name), "mean_percent": float(value)}
+            for lens_name, value in lens_means.items()
+            if isinstance(value, (int, float)) and math.isfinite(float(value))
+        ]
+        lens_mean_rows.sort(key=lambda row: (-float(row.get("mean_percent") or 0.0), str(row.get("lens") or "").lower()))
+        n_articles = _coerce_int(meta_row.get("n_articles"), default=0, minimum=0)
+        tag_points.append(
+            {
+                "tag_key": meta_row.get("tag_key"),
+                "tag": meta_row.get("tag") or raw_point.get("title"),
+                "n_articles": n_articles,
+                "n_sources": meta_row.get("n_sources"),
+                "source_counts": meta_row.get("source_counts", {}),
+                "lens_means": lens_means,
+                "top_lenses": lens_mean_rows[:5],
+                "bottom_lenses": list(reversed(lens_mean_rows[-5:])),
+                "sample_status": "near_minimum" if n_articles < (min_articles_per_tag * 2) else "ok",
+                "date_start": meta_row.get("date_start"),
+                "date_end": meta_row.get("date_end"),
+                "pc1": raw_point.get("pc1"),
+                "pc2": raw_point.get("pc2"),
+                "pc3": raw_point.get("pc3"),
+            }
+        )
+
+    for point in tag_points:
+        distances: list[dict[str, Any]] = []
+        for other in tag_points:
+            if other is point:
+                continue
+            distance = _euclidean_distance(point, other, ("pc1", "pc2", "pc3"))
+            if distance is None:
+                continue
+            distances.append(
+                {
+                    "tag_key": other.get("tag_key"),
+                    "tag": other.get("tag"),
+                    "distance_pca": distance,
+                }
+            )
+        distances.sort(key=lambda row: (float(row.get("distance_pca") or 0.0), str(row.get("tag") or "").lower()))
+        point["nearest_tags"] = distances[:5]
+
+    clusters: list[dict[str, Any]] = []
+    clustering_threshold = None
+    if len(tag_points) >= 2:
+        nearest_distances: list[float] = []
+        for point in tag_points:
+            nearest_tags = point.get("nearest_tags") if isinstance(point.get("nearest_tags"), list) else []
+            if not nearest_tags or not isinstance(nearest_tags[0], dict):
+                continue
+            distance = nearest_tags[0].get("distance_pca")
+            if isinstance(distance, (int, float)) and math.isfinite(float(distance)):
+                nearest_distances.append(float(distance))
+        if nearest_distances:
+            clustering_threshold = max(float(statistics.median(nearest_distances)) * 1.5, 1e-9)
+            parents = list(range(len(tag_points)))
+
+            def _find(index: int) -> int:
+                while parents[index] != index:
+                    parents[index] = parents[parents[index]]
+                    index = parents[index]
+                return index
+
+            def _union(left: int, right: int) -> None:
+                left_root = _find(left)
+                right_root = _find(right)
+                if left_root != right_root:
+                    parents[right_root] = left_root
+
+            for left_index, left_point in enumerate(tag_points):
+                for right_index in range(left_index + 1, len(tag_points)):
+                    distance = _euclidean_distance(left_point, tag_points[right_index], ("pc1", "pc2", "pc3"))
+                    if distance is not None and distance <= clustering_threshold:
+                        _union(left_index, right_index)
+
+            cluster_members: dict[int, list[int]] = defaultdict(list)
+            for point_index in range(len(tag_points)):
+                cluster_members[_find(point_index)].append(point_index)
+
+            raw_clusters: list[dict[str, Any]] = []
+            for member_indexes in cluster_members.values():
+                member_points = [tag_points[index] for index in member_indexes]
+                centroid = {
+                    "pc1": _mean_or_none([float(point["pc1"]) for point in member_points if isinstance(point.get("pc1"), (int, float))]),
+                    "pc2": _mean_or_none([float(point["pc2"]) for point in member_points if isinstance(point.get("pc2"), (int, float))]),
+                    "pc3": _mean_or_none([float(point["pc3"]) for point in member_points if isinstance(point.get("pc3"), (int, float))]),
+                }
+                lens_means_by_lens: dict[str, list[float]] = defaultdict(list)
+                source_counts: Counter[str] = Counter()
+                article_total = 0
+                for point in member_points:
+                    article_total += int(point.get("n_articles") or 0)
+                    point_source_counts = point.get("source_counts") if isinstance(point.get("source_counts"), dict) else {}
+                    for source, count in point_source_counts.items():
+                        source_counts[str(source)] += int(count or 0)
+                    point_lens_means = point.get("lens_means") if isinstance(point.get("lens_means"), dict) else {}
+                    for lens_name, value in point_lens_means.items():
+                        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                            lens_means_by_lens[str(lens_name)].append(float(value))
+                lens_means = {
+                    lens_name: sum(values) / len(values)
+                    for lens_name, values in lens_means_by_lens.items()
+                    if values
+                }
+                defining_lenses = [
+                    {"lens": lens_name, "mean_percent": value}
+                    for lens_name, value in lens_means.items()
+                ]
+                defining_lenses.sort(key=lambda row: (-float(row.get("mean_percent") or 0.0), str(row.get("lens") or "").lower()))
+
+                def _distance_to_centroid(point: dict[str, Any]) -> float:
+                    total = 0.0
+                    for key in ("pc1", "pc2", "pc3"):
+                        point_value = point.get(key)
+                        centroid_value = centroid.get(key)
+                        if isinstance(point_value, (int, float)) and isinstance(centroid_value, (int, float)):
+                            total += (float(point_value) - float(centroid_value)) ** 2
+                    return math.sqrt(total)
+
+                representative_points = sorted(
+                    member_points,
+                    key=lambda point: (
+                        _distance_to_centroid(point),
+                        -int(point.get("n_articles") or 0),
+                        str(point.get("tag") or "").lower(),
+                    ),
+                )
+                raw_clusters.append(
+                    {
+                        "member_indexes": member_indexes,
+                        "representative_points": representative_points,
+                        "n_tags": len(member_points),
+                        "n_articles": article_total,
+                        "n_sources": len(source_counts),
+                        "source_counts": dict(source_counts.most_common()),
+                        "defining_lenses": defining_lenses[:5],
+                        **centroid,
+                    }
+                )
+
+            raw_clusters.sort(
+                key=lambda row: (
+                    -int(row.get("n_tags") or 0),
+                    -int(row.get("n_articles") or 0),
+                    str(row.get("representative_points", [{}])[0].get("tag") or "").lower(),
+                )
+            )
+            for cluster_index, raw_cluster in enumerate(raw_clusters, start=1):
+                representative_points = raw_cluster.get("representative_points") if isinstance(raw_cluster.get("representative_points"), list) else []
+                representative_tags = [
+                    {
+                        "tag_key": point.get("tag_key"),
+                        "tag": point.get("tag"),
+                        "n_articles": point.get("n_articles"),
+                    }
+                    for point in representative_points[:6]
+                ]
+                cluster_id = f"tag-cluster-{cluster_index}"
+                cluster_label = ", ".join(str(point.get("tag") or "Unknown") for point in representative_points[:3])
+                cluster_row = {
+                    "cluster_id": cluster_id,
+                    "cluster": cluster_index,
+                    "label": cluster_label or f"Tag Cluster {cluster_index}",
+                    "n_tags": raw_cluster.get("n_tags"),
+                    "n_articles": raw_cluster.get("n_articles"),
+                    "n_sources": raw_cluster.get("n_sources"),
+                    "source_counts": raw_cluster.get("source_counts", {}),
+                    "representative_tags": representative_tags,
+                    "defining_lenses": raw_cluster.get("defining_lenses", []),
+                    "pc1": raw_cluster.get("pc1"),
+                    "pc2": raw_cluster.get("pc2"),
+                    "pc3": raw_cluster.get("pc3"),
+                }
+                clusters.append(cluster_row)
+                for member_index in raw_cluster.get("member_indexes", []):
+                    point = tag_points[member_index]
+                    point["cluster_id"] = cluster_id
+                    point["cluster"] = cluster_index
+                    point["cluster_label"] = cluster_row["label"]
+                    point["cluster_distance_pca"] = _euclidean_distance(point, cluster_row, ("pc1", "pc2", "pc3"))
+
+    components = pca_payload.get("components", [])
+    component_extremes: list[dict[str, Any]] = []
+    if isinstance(components, list):
+        for component_index, component_label_raw in enumerate(components[:3]):
+            component_label = str(component_label_raw or f"PC{component_index + 1}")
+            component_key = f"pc{component_index + 1}"
+            scored_points = [
+                point
+                for point in tag_points
+                if isinstance(point.get(component_key), (int, float))
+            ]
+            positive_tags = sorted(
+                scored_points,
+                key=lambda row: float(row.get(component_key) or 0.0),
+                reverse=True,
+            )[:6]
+            negative_tags = sorted(
+                scored_points,
+                key=lambda row: float(row.get(component_key) or 0.0),
+            )[:6]
+
+            def _extreme_row(point: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "tag_key": point.get("tag_key"),
+                    "tag": point.get("tag"),
+                    "score": point.get(component_key),
+                    "n_articles": point.get("n_articles"),
+                    "n_sources": point.get("n_sources"),
+                    "top_lenses": point.get("top_lenses", []),
+                }
+
+            component_extremes.append(
+                {
+                    "component": component_label,
+                    "positive_tags": [_extreme_row(point) for point in positive_tags],
+                    "negative_tags": [_extreme_row(point) for point in negative_tags],
+                }
+            )
+
+    explained_variance = pca_payload.get("explained_variance", [])
+    explained_rows = explained_variance if isinstance(explained_variance, list) else []
+    article_counts = sorted(
+        int(point.get("n_articles") or 0)
+        for point in tag_points
+        if isinstance(point.get("n_articles"), int) and int(point.get("n_articles") or 0) > 0
+    )
+    median_articles = None
+    if article_counts:
+        midpoint = len(article_counts) // 2
+        if len(article_counts) % 2:
+            median_articles = float(article_counts[midpoint])
+        else:
+            median_articles = (article_counts[midpoint - 1] + article_counts[midpoint]) / 2.0
+    summary = dict(base_payload["summary"])
+    summary.update(
+        {
+            "near_minimum_tag_count": sum(1 for point in tag_points if point.get("sample_status") == "near_minimum"),
+            "cluster_count": len(clusters),
+            "singleton_cluster_count": sum(1 for cluster in clusters if int(cluster.get("n_tags") or 0) == 1),
+            "clustering_threshold_pca": clustering_threshold,
+            "median_articles_per_tag": median_articles,
+            "max_articles_per_tag": max(article_counts) if article_counts else None,
+            "pc1_pc2_cumulative_variance_ratio": (
+                _coerce_float(explained_rows[1].get("cumulative_variance_ratio"))
+                if len(explained_rows) >= 2 and isinstance(explained_rows[1], dict)
+                else None
+            ),
+            "pc1_pc3_cumulative_variance_ratio": (
+                _coerce_float(explained_rows[2].get("cumulative_variance_ratio"))
+                if len(explained_rows) >= 3 and isinstance(explained_rows[2], dict)
+                else None
+            ),
+        }
+    )
+
+    return {
+        **base_payload,
+        "status": "ok",
+        "reason": "",
+        "n_tags": len(tag_points),
+        "n_lenses": pca_payload.get("n_lenses", len(lens_names)),
+        "lenses": pca_payload.get("lenses", lens_names),
+        "components": pca_payload.get("components", []),
+        "explained_variance": pca_payload.get("explained_variance", []),
+        "loadings": pca_payload.get("loadings", base_payload["loadings"]),
+        "component_summary": pca_payload.get("component_summary", []),
+        "variance_drivers": pca_payload.get("variance_drivers", []),
+        "component_extremes": component_extremes,
+        "clusters": clusters,
+        "tag_points": tag_points,
+        "summary": summary,
+    }
+
+
 def _source_topic_control_from_records(
     article_lens_percentages: list[dict[str, float]],
     source_labels: list[str],
@@ -2808,6 +4301,7 @@ def _source_topic_control_from_records(
     pooled_source_differentiation: dict[str, Any],
     pooled_source_lens_effects: dict[str, Any],
     preferred_lenses: list[str] | None = None,
+    source_differentiation_permutations: int = _SOURCE_DIFF_SLICE_PERMUTATIONS,
 ) -> dict[str, Any]:
     base_payload: dict[str, Any] = {
         "topic_basis": "topic_tags",
@@ -2883,6 +4377,7 @@ def _source_topic_control_from_records(
             topic_rows_data,
             topic_source_labels,
             preferred_lenses=preferred_lenses,
+            permutations=source_differentiation_permutations,
         )
 
         differentiation_ok = (
@@ -2917,6 +4412,746 @@ def _source_topic_control_from_records(
         "unavailable_topic_count": unavailable_topic_count,
     }
     return base_payload
+
+
+def _tag_slice_lens_summary(
+    rows: list[dict[str, float]],
+    preferred_lenses: list[str] | None = None,
+) -> dict[str, Any]:
+    discovered = {
+        lens_name
+        for row in rows
+        for lens_name, value in row.items()
+        if isinstance(lens_name, str) and isinstance(value, (int, float))
+    }
+    lens_names = _ordered_lenses(preferred_lenses or [], discovered)
+    lens_rows: list[dict[str, Any]] = []
+    for lens_name in lens_names:
+        values = [float(row[lens_name]) for row in rows if isinstance(row.get(lens_name), (int, float))]
+        if not values:
+            continue
+        lens_rows.append(
+            {
+                "lens": lens_name,
+                "n": len(values),
+                "mean_percent": sum(values) / len(values),
+                "min_percent": min(values),
+                "max_percent": max(values),
+            }
+        )
+    lens_rows.sort(key=lambda row: (-float(row.get("mean_percent", 0.0)), str(row.get("lens", "")).lower()))
+    return {"lenses": lens_rows, "lens_count": len(lens_rows)}
+
+
+def _tag_slice_trends(
+    rows: list[dict[str, float]],
+    article_meta_rows: list[dict[str, Any]],
+    preferred_lenses: list[str] | None = None,
+) -> dict[str, Any]:
+    if len(rows) != len(article_meta_rows):
+        return {"daily_counts": [], "daily_lens_means": []}
+
+    daily_counter: Counter[str] = Counter()
+    daily_lens_values: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    discovered: set[str] = set()
+    for lens_row, meta in zip(rows, article_meta_rows):
+        published = parse_datetime(meta.get("published_at") if isinstance(meta, dict) else None)
+        if published is None:
+            continue
+        day = published.date().isoformat()
+        daily_counter[day] += 1
+        for lens_name, value in lens_row.items():
+            if isinstance(lens_name, str) and isinstance(value, (int, float)):
+                discovered.add(lens_name)
+                daily_lens_values[day][lens_name].append(float(value))
+
+    lens_names = _ordered_lenses(preferred_lenses or [], discovered)
+    daily_counts = [{"date": day, "count": daily_counter[day]} for day in sorted(daily_counter.keys())]
+    daily_lens_means: list[dict[str, Any]] = []
+    for day in sorted(daily_lens_values.keys()):
+        row: dict[str, Any] = {"date": day}
+        for lens_name in lens_names:
+            values = daily_lens_values[day].get(lens_name, [])
+            if values:
+                row[lens_name] = sum(values) / len(values)
+        daily_lens_means.append(row)
+    return {"daily_counts": daily_counts, "daily_lens_means": daily_lens_means}
+
+
+def _tag_sliced_analysis_from_records(
+    article_lens_percentages: list[dict[str, float]],
+    source_labels: list[str],
+    tag_keys_for_lens_rows: list[list[str]],
+    tag_display_labels: dict[str, str],
+    article_meta_rows: list[dict[str, Any]],
+    pooled_source_differentiation: dict[str, Any],
+    pooled_source_lens_effects: dict[str, Any],
+    preferred_lenses: list[str] | None = None,
+    top_n: int = 20,
+    source_differentiation_permutations: int = _SOURCE_DIFF_SLICE_PERMUTATIONS,
+) -> dict[str, Any]:
+    base_payload: dict[str, Any] = {
+        "tag_basis": "topic_tags",
+        "multi_tag_policy": "duplicate_per_tag",
+        "pooled_label": "tag-confounded",
+        "top_n": top_n,
+        "pooled": {
+            "source_differentiation": (
+                pooled_source_differentiation if isinstance(pooled_source_differentiation, dict) else {}
+            ),
+            "source_lens_effects": pooled_source_lens_effects if isinstance(pooled_source_lens_effects, dict) else {},
+        },
+        "tags": [],
+        "summary": {
+            "tag_count": 0,
+            "shown_tag_count": 0,
+            "analyzed_tag_count": 0,
+            "unavailable_tag_count": 0,
+            "total_memberships": 0,
+        },
+    }
+    if (
+        not article_lens_percentages
+        or len(article_lens_percentages) != len(source_labels)
+        or len(article_lens_percentages) != len(tag_keys_for_lens_rows)
+        or len(article_lens_percentages) != len(article_meta_rows)
+    ):
+        return base_payload
+
+    tag_display = dict(tag_display_labels)
+    tag_display.setdefault("__untagged__", "Untagged")
+
+    tag_buckets: dict[str, dict[str, Any]] = defaultdict(lambda: {"rows": [], "source_labels": [], "article_meta_rows": []})
+    total_memberships = 0
+    for lens_row, source_label, tag_keys, meta_row in zip(
+        article_lens_percentages,
+        source_labels,
+        tag_keys_for_lens_rows,
+        article_meta_rows,
+    ):
+        effective_keys: list[str] = []
+        if isinstance(tag_keys, list):
+            for tag_key in tag_keys:
+                if not isinstance(tag_key, str):
+                    continue
+                normalized_key = tag_key.strip().lower()
+                if normalized_key:
+                    effective_keys.append(normalized_key)
+        if not effective_keys:
+            effective_keys = ["__untagged__"]
+
+        unique_keys = list(dict.fromkeys(effective_keys))
+        for tag_key in unique_keys:
+            tag_buckets[tag_key]["rows"].append(lens_row)
+            tag_buckets[tag_key]["source_labels"].append(source_label)
+            tag_buckets[tag_key]["article_meta_rows"].append(meta_row)
+            total_memberships += 1
+
+    all_tag_keys = sorted(
+        tag_buckets.keys(),
+        key=lambda key: (-len(tag_buckets[key]["rows"]), str(tag_display.get(key) or key).lower()),
+    )
+    shown_keys = all_tag_keys[: max(top_n, 0)]
+    if "__untagged__" in tag_buckets and "__untagged__" not in shown_keys:
+        shown_keys.append("__untagged__")
+
+    tag_rows: list[dict[str, Any]] = []
+    analyzed_tag_count = 0
+    unavailable_tag_count = 0
+    for tag_key in shown_keys:
+        bucket = tag_buckets[tag_key]
+        tag_rows_data = bucket["rows"] if isinstance(bucket.get("rows"), list) else []
+        tag_source_labels = bucket["source_labels"] if isinstance(bucket.get("source_labels"), list) else []
+        tag_meta_rows = bucket["article_meta_rows"] if isinstance(bucket.get("article_meta_rows"), list) else []
+        source_counts_counter: Counter[str] = Counter(tag_source_labels)
+        source_counts = {
+            source_name: count
+            for source_name, count in sorted(
+                source_counts_counter.items(),
+                key=lambda item: (-item[1], item[0].lower()),
+            )
+        }
+
+        tag_source_lens_effects = _source_lens_effects_from_records(
+            tag_rows_data,
+            tag_source_labels,
+            preferred_lenses=preferred_lenses,
+        )
+        tag_source_differentiation = _source_differentiation_from_records(
+            tag_rows_data,
+            tag_source_labels,
+            preferred_lenses=preferred_lenses,
+            permutations=source_differentiation_permutations,
+        )
+
+        differentiation_ok = (
+            isinstance(tag_source_differentiation, dict)
+            and str(tag_source_differentiation.get("status") or "") == "ok"
+        )
+        effects_ok = (
+            isinstance(tag_source_lens_effects, dict)
+            and str(tag_source_lens_effects.get("status") or "") == "ok"
+        )
+        if differentiation_ok or effects_ok:
+            analyzed_tag_count += 1
+        else:
+            unavailable_tag_count += 1
+
+        tag_rows.append(
+            {
+                "tag": tag_display.get(tag_key) or tag_key,
+                "tag_key": tag_key,
+                "n_articles": len(tag_rows_data),
+                "n_sources": len(source_counts_counter),
+                "source_counts": source_counts,
+                "lens_summary": _tag_slice_lens_summary(tag_rows_data, preferred_lenses=preferred_lenses),
+                "trends": _tag_slice_trends(tag_rows_data, tag_meta_rows, preferred_lenses=preferred_lenses),
+                "source_differentiation": tag_source_differentiation,
+                "source_lens_effects": tag_source_lens_effects,
+            }
+        )
+
+    tag_rows.sort(key=lambda row: (-int(row.get("n_articles", 0)), str(row.get("tag", "")).lower()))
+    base_payload["tags"] = tag_rows
+    base_payload["summary"] = {
+        "tag_count": len(all_tag_keys),
+        "shown_tag_count": len(tag_rows),
+        "analyzed_tag_count": analyzed_tag_count,
+        "unavailable_tag_count": unavailable_tag_count,
+        "total_memberships": total_memberships,
+    }
+    return base_payload
+
+
+def _event_control_from_records(
+    article_lens_percentages: list[dict[str, float]],
+    source_labels: list[str],
+    article_records: list[dict[str, Any]],
+    preferred_lenses: list[str] | None = None,
+) -> dict[str, Any]:
+    event_control = build_event_clusters(
+        article_records,
+        source_labels,
+        config=event_embedding_config_from_env(),
+    )
+    if str(event_control.get("status") or "") != "ok":
+        return event_control
+
+    event_member_indexes = event_control.pop("_event_member_indexes", [])
+    event_control["event_coverage"] = _event_coverage_from_clusters(
+        source_labels,
+        event_control.get("events", []),
+        event_member_indexes,
+    )
+    event_control["same_event_variance_decomposition"] = _same_event_variance_decomposition(
+        article_lens_percentages,
+        source_labels,
+        event_control.get("events", []),
+        event_member_indexes,
+        preferred_lenses=preferred_lenses,
+    )
+    event_control["same_event_pairwise_source_lens_deltas"] = _same_event_pairwise_source_lens_deltas(
+        article_lens_percentages,
+        source_labels,
+        event_control.get("events", []),
+        event_member_indexes,
+        preferred_lenses=preferred_lenses,
+    )
+    same_event_indexes: list[int] = []
+    for event, member_indexes in zip(event_control.get("events", []), event_member_indexes):
+        if not isinstance(event, dict) or not isinstance(member_indexes, list):
+            continue
+        source_counts = event.get("source_counts") if isinstance(event.get("source_counts"), dict) else {}
+        if len(source_counts) < 2:
+            continue
+        for row_index in member_indexes:
+            if isinstance(row_index, int):
+                same_event_indexes.append(row_index)
+
+    same_event_indexes = list(dict.fromkeys(same_event_indexes))
+    same_event_rows = [
+        article_lens_percentages[row_index]
+        for row_index in same_event_indexes
+        if 0 <= row_index < len(article_lens_percentages)
+    ]
+    same_event_sources = [
+        source_labels[row_index]
+        for row_index in same_event_indexes
+        if 0 <= row_index < len(source_labels)
+    ]
+
+    if not same_event_rows or len(same_event_rows) != len(same_event_sources):
+        reason = "No multi-source event clusters with scored article rows are available."
+        event_control["same_event_source_differentiation"] = _source_differentiation_from_records(
+            [],
+            [],
+            preferred_lenses=preferred_lenses,
+        )
+        event_control["same_event_source_differentiation"]["reason"] = reason
+        event_control["same_event_source_lens_effects"] = _source_lens_effects_from_records(
+            [],
+            [],
+            preferred_lenses=preferred_lenses,
+        )
+        event_control["same_event_source_lens_effects"]["reason"] = reason
+        return event_control
+
+    event_control["same_event_source_differentiation"] = _source_differentiation_from_records(
+        same_event_rows,
+        same_event_sources,
+        preferred_lenses=preferred_lenses,
+    )
+    event_control["same_event_source_lens_effects"] = _source_lens_effects_from_records(
+        same_event_rows,
+        same_event_sources,
+        preferred_lenses=preferred_lenses,
+    )
+    return event_control
+
+
+def _same_event_pairwise_source_lens_deltas(
+    article_lens_percentages: list[dict[str, float]],
+    source_labels: list[str],
+    events: list[Any],
+    event_member_indexes: list[Any],
+    preferred_lenses: list[str] | None = None,
+) -> dict[str, Any]:
+    method = "event_source_mean_pairwise_delta_v1"
+    unavailable = {
+        "status": "unavailable",
+        "reason": "No multi-source event clusters with shared lens rows are available.",
+        "method": method,
+        "rows": [],
+        "summary": {
+            "source_pair_count": 0,
+            "lens_count": 0,
+            "row_count": 0,
+            "event_pair_observation_count": 0,
+        },
+    }
+    if not events or not event_member_indexes:
+        return unavailable
+
+    discovered_lenses = {
+        lens_name
+        for row in article_lens_percentages
+        for lens_name, value in row.items()
+        if isinstance(lens_name, str) and isinstance(value, (int, float))
+    }
+    if preferred_lenses:
+        ordered_lenses = [lens_name for lens_name in preferred_lenses if lens_name in discovered_lenses]
+        ordered_lenses.extend(sorted(discovered_lenses - set(ordered_lenses)))
+    else:
+        ordered_lenses = sorted(discovered_lenses)
+
+    deltas_by_key: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for event, member_indexes in zip(events, event_member_indexes):
+        if not isinstance(event, dict) or not isinstance(member_indexes, list):
+            continue
+        event_id = str(event.get("event_id") or "")
+        source_lens_values: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+        for row_index in member_indexes:
+            if not isinstance(row_index, int) or row_index < 0 or row_index >= len(article_lens_percentages):
+                continue
+            if row_index >= len(source_labels):
+                continue
+            source_label = source_labels[row_index]
+            lens_row = article_lens_percentages[row_index]
+            for lens_name in ordered_lenses:
+                value = lens_row.get(lens_name)
+                if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                    source_lens_values[source_label][lens_name].append(float(value))
+
+        source_means: dict[str, dict[str, float]] = {}
+        for source_label, lens_values in source_lens_values.items():
+            means = {
+                lens_name: sum(values) / len(values)
+                for lens_name, values in lens_values.items()
+                if values
+            }
+            if means:
+                source_means[source_label] = means
+
+        sorted_sources = sorted(source_means.keys(), key=lambda value: value.lower())
+        if len(sorted_sources) < 2:
+            continue
+        for left_idx, source_a in enumerate(sorted_sources):
+            for source_b in sorted_sources[left_idx + 1 :]:
+                means_a = source_means[source_a]
+                means_b = source_means[source_b]
+                for lens_name in ordered_lenses:
+                    if lens_name not in means_a or lens_name not in means_b:
+                        continue
+                    delta = means_a[lens_name] - means_b[lens_name]
+                    deltas_by_key[(source_a, source_b, lens_name)].append(
+                        {
+                            "event_id": event_id,
+                            "delta": delta,
+                            "source_a_mean": means_a[lens_name],
+                            "source_b_mean": means_b[lens_name],
+                        }
+                    )
+
+    rows: list[dict[str, Any]] = []
+    source_pairs: set[tuple[str, str]] = set()
+    lens_names: set[str] = set()
+    event_pair_observation_count = 0
+    for (source_a, source_b, lens_name), observations in deltas_by_key.items():
+        deltas = [float(obs["delta"]) for obs in observations if isinstance(obs.get("delta"), (int, float))]
+        if not deltas:
+            continue
+        source_pairs.add((source_a, source_b))
+        lens_names.add(lens_name)
+        event_pair_observation_count += len(deltas)
+        event_ids = [str(obs.get("event_id") or "") for obs in observations if obs.get("event_id")]
+        rows.append(
+            {
+                "source_a": source_a,
+                "source_b": source_b,
+                "lens": lens_name,
+                "n_events": len(deltas),
+                "mean_delta_a_minus_b": sum(deltas) / len(deltas),
+                "median_delta_a_minus_b": statistics.median(deltas),
+                "mean_abs_delta": sum(abs(delta) for delta in deltas) / len(deltas),
+                "max_abs_delta": max(abs(delta) for delta in deltas),
+                "source_a_higher_event_count": sum(1 for delta in deltas if delta > 0),
+                "source_b_higher_event_count": sum(1 for delta in deltas if delta < 0),
+                "tied_event_count": sum(1 for delta in deltas if delta == 0),
+                "event_ids": event_ids,
+            }
+        )
+
+    if not rows:
+        return unavailable
+
+    rows.sort(
+        key=lambda row: (
+            -float(row.get("mean_abs_delta") or 0.0),
+            str(row.get("source_a", "")).lower(),
+            str(row.get("source_b", "")).lower(),
+            str(row.get("lens", "")).lower(),
+        )
+    )
+    return {
+        "status": "ok",
+        "reason": "",
+        "method": method,
+        "rows": rows,
+        "summary": {
+            "source_pair_count": len(source_pairs),
+            "lens_count": len(lens_names),
+            "row_count": len(rows),
+            "event_pair_observation_count": event_pair_observation_count,
+        },
+    }
+
+
+def _event_coverage_from_clusters(
+    source_labels: list[str],
+    events: list[Any],
+    event_member_indexes: list[Any],
+) -> dict[str, Any]:
+    method = "event_source_coverage_v1"
+    unavailable = {
+        "status": "unavailable",
+        "reason": "No event clusters are available for source coverage diagnostics.",
+        "method": method,
+        "source_rows": [],
+        "source_pair_rows": [],
+        "summary": {
+            "source_count": 0,
+            "source_pair_count": 0,
+            "event_article_memberships": 0,
+            "multi_source_event_article_memberships": 0,
+        },
+    }
+    if not events or not event_member_indexes:
+        return unavailable
+
+    total_source_articles = Counter(source_labels)
+    source_event_ids: dict[str, set[str]] = defaultdict(set)
+    source_multi_event_ids: dict[str, set[str]] = defaultdict(set)
+    source_event_article_counts: Counter[str] = Counter()
+    source_multi_event_article_counts: Counter[str] = Counter()
+    pair_event_ids: dict[tuple[str, str], set[str]] = defaultdict(set)
+    pair_article_counts: Counter[tuple[str, str]] = Counter()
+
+    for event, member_indexes in zip(events, event_member_indexes):
+        if not isinstance(event, dict) or not isinstance(member_indexes, list):
+            continue
+        event_id = str(event.get("event_id") or "")
+        if not event_id:
+            continue
+        event_sources = []
+        for row_index in member_indexes:
+            if not isinstance(row_index, int) or row_index < 0 or row_index >= len(source_labels):
+                continue
+            source_label = source_labels[row_index]
+            event_sources.append(source_label)
+            source_event_ids[source_label].add(event_id)
+            source_event_article_counts[source_label] += 1
+
+        unique_sources = sorted(set(event_sources), key=lambda value: value.lower())
+        if len(unique_sources) < 2:
+            continue
+
+        for source_label in event_sources:
+            source_multi_event_ids[source_label].add(event_id)
+            source_multi_event_article_counts[source_label] += 1
+
+        event_source_counts = Counter(event_sources)
+        for left_idx, source_a in enumerate(unique_sources):
+            for source_b in unique_sources[left_idx + 1 :]:
+                key = (source_a, source_b)
+                pair_event_ids[key].add(event_id)
+                pair_article_counts[key] += event_source_counts[source_a] + event_source_counts[source_b]
+
+    source_names = sorted(set(total_source_articles) | set(source_event_ids), key=lambda value: value.lower())
+    source_rows = []
+    for source_name in source_names:
+        total_articles = int(total_source_articles.get(source_name, 0))
+        event_articles = int(source_event_article_counts.get(source_name, 0))
+        multi_event_articles = int(source_multi_event_article_counts.get(source_name, 0))
+        source_rows.append(
+            {
+                "source": source_name,
+                "total_scored_articles": total_articles,
+                "event_count": len(source_event_ids.get(source_name, set())),
+                "multi_source_event_count": len(source_multi_event_ids.get(source_name, set())),
+                "event_article_count": event_articles,
+                "multi_source_event_article_count": multi_event_articles,
+                "event_article_coverage_ratio": (event_articles / total_articles) if total_articles else 0.0,
+                "multi_source_event_article_coverage_ratio": (multi_event_articles / total_articles) if total_articles else 0.0,
+            }
+        )
+
+    source_rows.sort(
+        key=lambda row: (
+            -int(row.get("multi_source_event_count", 0)),
+            -int(row.get("multi_source_event_article_count", 0)),
+            str(row.get("source", "")).lower(),
+        )
+    )
+
+    source_pair_rows = []
+    for (source_a, source_b), event_ids in pair_event_ids.items():
+        source_pair_rows.append(
+            {
+                "source_a": source_a,
+                "source_b": source_b,
+                "shared_event_count": len(event_ids),
+                "shared_event_article_count": int(pair_article_counts.get((source_a, source_b), 0)),
+                "event_ids": sorted(event_ids),
+            }
+        )
+    source_pair_rows.sort(
+        key=lambda row: (
+            -int(row.get("shared_event_count", 0)),
+            -int(row.get("shared_event_article_count", 0)),
+            str(row.get("source_a", "")).lower(),
+            str(row.get("source_b", "")).lower(),
+        )
+    )
+
+    if not source_rows and not source_pair_rows:
+        return unavailable
+
+    return {
+        "status": "ok",
+        "reason": "",
+        "method": method,
+        "source_rows": source_rows,
+        "source_pair_rows": source_pair_rows,
+        "summary": {
+            "source_count": len(source_rows),
+            "source_pair_count": len(source_pair_rows),
+            "event_article_memberships": sum(source_event_article_counts.values()),
+            "multi_source_event_article_memberships": sum(source_multi_event_article_counts.values()),
+        },
+    }
+
+
+def _same_event_variance_decomposition(
+    article_lens_percentages: list[dict[str, float]],
+    source_labels: list[str],
+    events: list[Any],
+    event_member_indexes: list[Any],
+    preferred_lenses: list[str] | None = None,
+) -> dict[str, Any]:
+    method = "event_centered_source_variance_v1"
+    unavailable = {
+        "status": "unavailable",
+        "reason": "No multi-source event clusters with shared lens rows are available.",
+        "method": method,
+        "rows": [],
+        "summary": {"lens_count": 0, "row_count": 0, "event_count": 0, "source_count": 0},
+    }
+    if not events or not event_member_indexes:
+        return unavailable
+
+    observations: list[dict[str, Any]] = []
+    for event, member_indexes in zip(events, event_member_indexes):
+        if not isinstance(event, dict) or not isinstance(member_indexes, list):
+            continue
+        event_id = str(event.get("event_id") or "")
+        source_counts = event.get("source_counts") if isinstance(event.get("source_counts"), dict) else {}
+        if len(source_counts) < 2:
+            continue
+        for row_index in member_indexes:
+            if not isinstance(row_index, int) or row_index < 0 or row_index >= len(article_lens_percentages):
+                continue
+            if row_index >= len(source_labels):
+                continue
+            observations.append(
+                {
+                    "event_id": event_id,
+                    "source": source_labels[row_index],
+                    "lens_row": article_lens_percentages[row_index],
+                }
+            )
+
+    if not observations:
+        return unavailable
+
+    discovered_lenses = {
+        lens_name
+        for obs in observations
+        for lens_name, value in obs["lens_row"].items()
+        if isinstance(lens_name, str) and isinstance(value, (int, float)) and math.isfinite(float(value))
+    }
+    if preferred_lenses:
+        lens_names = [lens_name for lens_name in preferred_lenses if lens_name in discovered_lenses]
+        lens_names.extend(sorted(discovered_lenses - set(lens_names)))
+    else:
+        lens_names = sorted(discovered_lenses)
+
+    rows: list[dict[str, Any]] = []
+    for lens_name in lens_names:
+        values: list[float] = []
+        event_labels: list[str] = []
+        source_labels_for_lens: list[str] = []
+        for obs in observations:
+            value = obs["lens_row"].get(lens_name)
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                continue
+            values.append(float(value))
+            event_labels.append(str(obs["event_id"]))
+            source_labels_for_lens.append(str(obs["source"]))
+
+        if len(values) < 2:
+            continue
+        unique_events = sorted(set(event_labels))
+        unique_sources = sorted(set(source_labels_for_lens))
+        if len(unique_events) < 1 or len(unique_sources) < 2:
+            continue
+
+        grand_mean = sum(values) / len(values)
+        ss_total = sum((value - grand_mean) ** 2 for value in values)
+        if ss_total <= 0:
+            rows.append(
+                {
+                    "lens": lens_name,
+                    "n": len(values),
+                    "event_count": len(unique_events),
+                    "source_count": len(unique_sources),
+                    "overall_mean": grand_mean,
+                    "ss_total": ss_total,
+                    "event_eta_sq": 0.0,
+                    "source_eta_sq_raw": 0.0,
+                    "source_eta_sq_event_centered": 0.0,
+                    "additive_event_source_r_squared": 0.0,
+                    "residual_ss_additive": 0.0,
+                    "strongest_source_after_event_control": None,
+                    "source_residual_means": {},
+                }
+            )
+            continue
+
+        event_values: dict[str, list[float]] = defaultdict(list)
+        source_values: dict[str, list[float]] = defaultdict(list)
+        for value, event_id, source_label in zip(values, event_labels, source_labels_for_lens):
+            event_values[event_id].append(value)
+            source_values[source_label].append(value)
+
+        event_means = {event_id: sum(vals) / len(vals) for event_id, vals in event_values.items() if vals}
+        source_means = {source_label: sum(vals) / len(vals) for source_label, vals in source_values.items() if vals}
+        ss_event = sum(len(event_values[event_id]) * ((event_means[event_id] - grand_mean) ** 2) for event_id in event_means)
+        ss_source_raw = sum(
+            len(source_values[source_label]) * ((source_means[source_label] - grand_mean) ** 2)
+            for source_label in source_means
+        )
+
+        event_centered_values: list[float] = []
+        event_centered_sources: list[str] = []
+        for value, event_id, source_label in zip(values, event_labels, source_labels_for_lens):
+            event_centered_values.append(value - event_means.get(event_id, grand_mean))
+            event_centered_sources.append(source_label)
+        centered_total_mean = sum(event_centered_values) / len(event_centered_values)
+        centered_ss_total = sum((value - centered_total_mean) ** 2 for value in event_centered_values)
+        centered_by_source: dict[str, list[float]] = defaultdict(list)
+        for value, source_label in zip(event_centered_values, event_centered_sources):
+            centered_by_source[source_label].append(value)
+        source_residual_means = {
+            source_label: sum(vals) / len(vals)
+            for source_label, vals in centered_by_source.items()
+            if vals
+        }
+        centered_ss_source = sum(
+            len(centered_by_source[source_label]) * ((source_residual_means[source_label] - centered_total_mean) ** 2)
+            for source_label in source_residual_means
+        )
+
+        additive_residual_ss = 0.0
+        for value, event_id, source_label in zip(values, event_labels, source_labels_for_lens):
+            predicted = event_means.get(event_id, grand_mean) + source_means.get(source_label, grand_mean) - grand_mean
+            additive_residual_ss += (value - predicted) ** 2
+
+        strongest_source = None
+        if source_residual_means:
+            strongest_source = max(source_residual_means.items(), key=lambda item: abs(item[1]))[0]
+
+        rows.append(
+            {
+                "lens": lens_name,
+                "n": len(values),
+                "event_count": len(unique_events),
+                "source_count": len(unique_sources),
+                "overall_mean": grand_mean,
+                "ss_total": ss_total,
+                "event_eta_sq": ss_event / ss_total,
+                "source_eta_sq_raw": ss_source_raw / ss_total,
+                "source_eta_sq_event_centered": (centered_ss_source / centered_ss_total) if centered_ss_total > 0 else 0.0,
+                "additive_event_source_r_squared": max(0.0, min(1.0, 1.0 - (additive_residual_ss / ss_total))),
+                "residual_ss_additive": additive_residual_ss,
+                "strongest_source_after_event_control": strongest_source,
+                "source_residual_means": dict(
+                    sorted(source_residual_means.items(), key=lambda item: (-abs(item[1]), item[0].lower()))
+                ),
+            }
+        )
+
+    if not rows:
+        return unavailable
+
+    rows.sort(
+        key=lambda row: (
+            -float(row.get("source_eta_sq_event_centered") or 0.0),
+            -float(row.get("additive_event_source_r_squared") or 0.0),
+            str(row.get("lens", "")).lower(),
+        )
+    )
+    return {
+        "status": "ok",
+        "reason": "",
+        "method": method,
+        "rows": rows,
+        "summary": {
+            "lens_count": len(rows),
+            "row_count": len(rows),
+            "event_count": len({obs["event_id"] for obs in observations if obs.get("event_id")}),
+            "source_count": len({obs["source"] for obs in observations if obs.get("source")}),
+        },
+    }
 
 
 def _source_reliability_assessment(
@@ -3090,8 +5325,19 @@ def _source_reliability_from_topic_control(
     source_differentiation: dict[str, Any],
     source_lens_effects: dict[str, Any],
     source_topic_control: dict[str, Any],
+    tag_sliced_analysis: dict[str, Any] | None = None,
+    event_control: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     pooled_assessment = _source_reliability_assessment(source_differentiation, source_lens_effects)
+    event_control = event_control if isinstance(event_control, dict) else {}
+    event_controlled_assessment = _source_reliability_assessment(
+        event_control.get("same_event_source_differentiation")
+        if isinstance(event_control.get("same_event_source_differentiation"), dict)
+        else {},
+        event_control.get("same_event_source_lens_effects")
+        if isinstance(event_control.get("same_event_source_lens_effects"), dict)
+        else {},
+    )
 
     topic_rows = source_topic_control.get("topics") if isinstance(source_topic_control.get("topics"), list) else []
     topic_assessments: list[dict[str, Any]] = []
@@ -3111,26 +5357,64 @@ def _source_reliability_from_topic_control(
             }
         )
 
-    tier_counter: Counter[str] = Counter()
-    status_counter: Counter[str] = Counter()
+    tag_sliced_analysis = tag_sliced_analysis if isinstance(tag_sliced_analysis, dict) else {}
+    tag_rows = tag_sliced_analysis.get("tags") if isinstance(tag_sliced_analysis.get("tags"), list) else []
+    tag_assessments: list[dict[str, Any]] = []
+    for tag_row in tag_rows:
+        if not isinstance(tag_row, dict):
+            continue
+        tag_name = str(tag_row.get("tag") or "").strip()
+        if not tag_name:
+            continue
+        tag_assessments.append(
+            {
+                "tag": tag_name,
+                "assessment": _source_reliability_assessment(
+                    tag_row.get("source_differentiation") if isinstance(tag_row.get("source_differentiation"), dict) else {},
+                    tag_row.get("source_lens_effects") if isinstance(tag_row.get("source_lens_effects"), dict) else {},
+                ),
+            }
+        )
+
+    topic_tier_counter: Counter[str] = Counter()
+    topic_status_counter: Counter[str] = Counter()
     for topic_item in topic_assessments:
         assessment = topic_item.get("assessment") if isinstance(topic_item.get("assessment"), dict) else {}
-        tier_counter[str(assessment.get("tier") or "unavailable")] += 1
-        status_counter[str(assessment.get("status") or "unavailable")] += 1
+        topic_tier_counter[str(assessment.get("tier") or "unavailable")] += 1
+        topic_status_counter[str(assessment.get("status") or "unavailable")] += 1
+
+    tag_tier_counter: Counter[str] = Counter()
+    tag_status_counter: Counter[str] = Counter()
+    for tag_item in tag_assessments:
+        assessment = tag_item.get("assessment") if isinstance(tag_item.get("assessment"), dict) else {}
+        tag_tier_counter[str(assessment.get("tier") or "unavailable")] += 1
+        tag_status_counter[str(assessment.get("status") or "unavailable")] += 1
 
     return {
         "method": "heuristic-v1",
         "pooled_label": "topic-confounded",
+        "tag_basis": tag_sliced_analysis.get("tag_basis") or "topic_tags",
         "pooled": pooled_assessment,
+        "event_controlled": event_controlled_assessment,
         "topics": topic_assessments,
+        "tags": tag_assessments,
         "summary": {
             "topic_count": len(topic_assessments),
-            "ok_topic_count": status_counter.get("ok", 0),
-            "unavailable_topic_count": status_counter.get("unavailable", 0),
-            "high_count": tier_counter.get("high", 0),
-            "moderate_count": tier_counter.get("moderate", 0),
-            "low_count": tier_counter.get("low", 0),
-            "unavailable_count": tier_counter.get("unavailable", 0),
+            "ok_topic_count": topic_status_counter.get("ok", 0),
+            "unavailable_topic_count": topic_status_counter.get("unavailable", 0),
+            "high_count": topic_tier_counter.get("high", 0),
+            "moderate_count": topic_tier_counter.get("moderate", 0),
+            "low_count": topic_tier_counter.get("low", 0),
+            "unavailable_count": topic_tier_counter.get("unavailable", 0),
+            "tag_count": len(tag_assessments),
+            "ok_tag_count": tag_status_counter.get("ok", 0),
+            "unavailable_tag_count": tag_status_counter.get("unavailable", 0),
+            "high_tag_count": tag_tier_counter.get("high", 0),
+            "moderate_tag_count": tag_tier_counter.get("moderate", 0),
+            "low_tag_count": tag_tier_counter.get("low", 0),
+            "unavailable_tag_reliability_count": tag_tier_counter.get("unavailable", 0),
+            "event_controlled_status": event_controlled_assessment.get("status") or "unavailable",
+            "event_controlled_tier": event_controlled_assessment.get("tier") or "unavailable",
         },
     }
 
@@ -3156,7 +5440,10 @@ def derive_stats(records: list[dict[str, Any]], payload: Any) -> dict[str, Any]:
     source_labels_for_lens_rows: list[str] = []
     topic_keys_for_lens_rows: list[list[str]] = []
     topic_display_labels: dict[str, str] = {}
+    tag_keys_for_lens_rows: list[list[str]] = []
+    tag_display_labels: dict[str, str] = {}
     article_meta_for_lens_rows: list[dict[str, Any]] = []
+    article_records_for_lens_rows: list[dict[str, Any]] = []
 
     scored_articles = 0
     zero_score_articles = 0
@@ -3167,11 +5454,7 @@ def derive_stats(records: list[dict[str, Any]], payload: Any) -> dict[str, Any]:
     placeholder_zero_unscorable_articles = 0
 
     for record in records:
-        source = record.get("source")
-        source_name = None
-        if isinstance(source, dict):
-            source_name = source.get("name") or source.get("id")
-        source_label = _clean_text(source_name) or "Unknown"
+        source_label = _source_label_for_record(record)
         source_counter[source_label] += 1
 
         unique_tags = {tag.strip() for tag in _tag_values_for_record(record) if tag.strip()}
@@ -3211,12 +5494,16 @@ def derive_stats(records: list[dict[str, Any]], payload: Any) -> dict[str, Any]:
         lens_percentages = _record_lens_percentages(record, lens_maxima)
         if lens_percentages:
             topic_keys = _topic_memberships_from_record(record, topic_display_labels)
+            tag_keys = _tag_memberships_from_record(record, tag_display_labels)
             strongest_lens, strongest_percent = max(lens_percentages.items(), key=lambda item: item[1])
             article_lens_percentages.append(lens_percentages)
             source_labels_for_lens_rows.append(source_label)
             topic_keys_for_lens_rows.append(topic_keys)
+            tag_keys_for_lens_rows.append(tag_keys)
+            article_records_for_lens_rows.append(record)
             article_meta_for_lens_rows.append(
                 {
+                    "row_index": len(article_lens_percentages) - 1,
                     "id": _clean_text(record.get("id")),
                     "title": _clean_text(record.get("title")),
                     "source": source_label,
@@ -3300,9 +5587,18 @@ def derive_stats(records: list[dict[str, Any]], payload: Any) -> dict[str, Any]:
         source_labels_for_lens_rows,
         preferred_lenses=list(lens_maxima.keys()),
     )
+    latent_space_stability = _latent_space_stability_from_records(
+        article_lens_percentages,
+        source_labels_for_lens_rows,
+        article_meta_for_lens_rows,
+        lens_pca,
+        preferred_lenses=list(lens_maxima.keys()),
+    )
     lens_time_series = _lens_time_series_from_records(records, lens_maxima)
     lens_temporal_embedding = _lens_temporal_embedding_from_pca(lens_pca)
     lens_temporal_embedding_mds = _lens_temporal_embedding_from_mds(lens_mds)
+    drift_diagnostics = _drift_diagnostics_from_records(records, lens_maxima)
+    tag_momentum = _tag_momentum_from_records(records)
     source_lens_effects = _source_lens_effects_from_records(
         article_lens_percentages,
         source_labels_for_lens_rows,
@@ -3322,10 +5618,48 @@ def derive_stats(records: list[dict[str, Any]], payload: Any) -> dict[str, Any]:
         pooled_source_lens_effects=source_lens_effects,
         preferred_lenses=list(lens_maxima.keys()),
     )
+    tag_sliced_analysis = _tag_sliced_analysis_from_records(
+        article_lens_percentages,
+        source_labels_for_lens_rows,
+        topic_keys_for_lens_rows,
+        topic_display_labels,
+        article_meta_for_lens_rows,
+        pooled_source_differentiation=source_differentiation,
+        pooled_source_lens_effects=source_lens_effects,
+        preferred_lenses=list(lens_maxima.keys()),
+    )
+    group_latent_space = _group_latent_space_from_records(
+        article_lens_percentages,
+        source_labels_for_lens_rows,
+        topic_keys_for_lens_rows,
+        topic_display_labels,
+        tag_keys_for_lens_rows,
+        tag_display_labels,
+        article_meta_for_lens_rows,
+        lens_pca,
+        lens_mds,
+        preferred_lenses=list(lens_maxima.keys()),
+    )
+    tag_lens_pca = _tag_lens_pca_from_records(
+        article_lens_percentages,
+        source_labels_for_lens_rows,
+        tag_keys_for_lens_rows,
+        tag_display_labels,
+        article_meta_for_lens_rows,
+        preferred_lenses=list(lens_maxima.keys()),
+    )
+    event_control = _event_control_from_records(
+        article_lens_percentages,
+        source_labels_for_lens_rows,
+        article_records_for_lens_rows,
+        preferred_lenses=list(lens_maxima.keys()),
+    )
     source_reliability = _source_reliability_from_topic_control(
         source_differentiation,
         source_lens_effects,
         source_topic_control,
+        tag_sliced_analysis,
+        event_control,
     )
     lens_views = _lens_views_from_records(records, lens_maxima)
     data_quality = _data_quality_from_records(records)
@@ -3371,12 +5705,19 @@ def derive_stats(records: list[dict[str, Any]], payload: Any) -> dict[str, Any]:
         "lens_pca": lens_pca,
         "lens_mds": lens_mds,
         "lens_separation": lens_separation,
+        "latent_space_stability": latent_space_stability,
         "lens_time_series": lens_time_series,
         "lens_temporal_embedding": lens_temporal_embedding,
         "lens_temporal_embedding_mds": lens_temporal_embedding_mds,
+        "drift_diagnostics": drift_diagnostics,
+        "tag_momentum": tag_momentum,
         "source_lens_effects": source_lens_effects,
         "source_differentiation": source_differentiation,
         "source_topic_control": source_topic_control,
+        "tag_sliced_analysis": tag_sliced_analysis,
+        "group_latent_space": group_latent_space,
+        "tag_lens_pca": tag_lens_pca,
+        "event_control": event_control,
         "source_reliability": source_reliability,
         "lens_views": lens_views,
         "source_tag_views": source_tag_views,

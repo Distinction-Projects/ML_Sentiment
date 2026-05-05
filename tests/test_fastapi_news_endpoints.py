@@ -132,6 +132,11 @@ class FastApiNewsEndpointTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertIn("derived", payload["data"])
         self.assertIn("source_topic_control", payload["data"]["derived"])
+        self.assertIn("tag_sliced_analysis", payload["data"]["derived"])
+        self.assertIn("tag_momentum", payload["data"]["derived"])
+        self.assertIn("group_latent_space", payload["data"]["derived"])
+        self.assertIn("tag_lens_pca", payload["data"]["derived"])
+        self.assertIn("event_control", payload["data"]["derived"])
 
         snapshot = self.client.get(f"/api/news/stats?snapshot_date={self.snapshot_date}")
         self.assertEqual(snapshot.status_code, 200)
@@ -142,6 +147,80 @@ class FastApiNewsEndpointTests(unittest.TestCase):
         missing_snapshot = self.client.get("/api/news/stats?snapshot_date=2026-03-09")
         self.assertEqual(missing_snapshot.status_code, 404)
         self.assertEqual(missing_snapshot.json()["status"], "not_found")
+
+    def test_stats_precomputed_mode_serves_snapshot_and_missing_returns_503(self):
+        snapshot_payload = {
+            "status": "ok",
+            "meta": {"source_url": "file://precomputed.json", "source_mode": "current"},
+            "data": {
+                "derived": {
+                    "total_articles": 1,
+                    "tag_sliced_analysis": {"summary": {"tag_count": 0}},
+                    "event_control": {
+                        "status": "ok",
+                        "reason": "",
+                        "summary": {
+                            "total_articles_considered": 3,
+                            "embedded_count": 3,
+                            "event_count": 1,
+                            "multi_source_event_count": 1,
+                            "singleton_count": 1,
+                        },
+                        "cache": {"enabled": True, "hits": 3, "misses": 0, "stored": 0},
+                        "config": {
+                            "embedding_model": "test-model",
+                            "embedding_dimensions": 3,
+                            "similarity_threshold": 0.86,
+                            "date_window_days": 3,
+                        },
+                    },
+                },
+                "summary": {},
+                "analysis": {},
+            },
+        }
+        precomputed_path = self.temp_dir / "precomputed_stats.json"
+        precomputed_path.write_text(json.dumps(snapshot_payload), encoding="utf-8")
+
+        previous_backend = os.environ.get("NEWS_STATS_BACKEND")
+        previous_path = os.environ.get("NEWS_STATS_SNAPSHOT_PATH")
+        try:
+            os.environ["NEWS_STATS_BACKEND"] = "precomputed"
+            os.environ["NEWS_STATS_SNAPSHOT_PATH"] = str(precomputed_path)
+            response = self.client.get("/api/news/stats")
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("public, max-age=", response.headers.get("cache-control", ""))
+            payload = response.json()
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["data"]["derived"]["total_articles"], 1)
+            self.assertEqual(payload["meta"]["stats_backend"], "precomputed")
+
+            exported = self.client.get("/api/news/export?artifact=event_control_summary&format=json")
+            self.assertEqual(exported.status_code, 200)
+            export_payload = exported.json()
+            self.assertEqual(export_payload["meta"]["stats_backend"], "precomputed")
+            self.assertEqual(export_payload["rows"][0]["event_count"], 1)
+            self.assertEqual(export_payload["rows"][0]["cache_hits"], 3)
+
+            os.environ["NEWS_STATS_SNAPSHOT_PATH"] = str(self.temp_dir / "missing_precomputed_stats.json")
+            missing = self.client.get("/api/news/stats")
+            self.assertEqual(missing.status_code, 503)
+            self.assertEqual(missing.headers.get("cache-control"), "no-store")
+            self.assertEqual(missing.json()["status"], "precomputed_stats_unavailable")
+
+            missing_export = self.client.get("/api/news/export?artifact=event_control_summary&format=json")
+            self.assertEqual(missing_export.status_code, 503)
+            self.assertEqual(missing_export.headers.get("cache-control"), "no-store")
+            self.assertEqual(missing_export.json()["status"], "precomputed_stats_unavailable")
+        finally:
+            if previous_backend is None:
+                os.environ.pop("NEWS_STATS_BACKEND", None)
+            else:
+                os.environ["NEWS_STATS_BACKEND"] = previous_backend
+            if previous_path is None:
+                os.environ.pop("NEWS_STATS_SNAPSHOT_PATH", None)
+            else:
+                os.environ["NEWS_STATS_SNAPSHOT_PATH"] = previous_path
 
     def test_export_csv_and_freshness(self):
         exported = self.client.get("/api/news/export?artifact=source_differentiation_summary&format=csv")

@@ -71,11 +71,35 @@ class NewsControllerTests(unittest.TestCase):
         self.assertIsInstance(response.body, dict)
         self.assertEqual(response.body.get("status"), "bad_request")
 
+    def test_digest_success_sets_cache_headers_and_refresh_disables_cache(self):
+        controller = NewsController(RssDigestClient())
+        cached = controller.get_digest(
+            refresh=None,
+            date=None,
+            tag=None,
+            source=None,
+            limit="1",
+            snapshot_date=None,
+        )
+        self.assertEqual(cached.status_code, 200)
+        self.assertIn("public, max-age=", cached.headers.get("Cache-Control", ""))
+
+        refreshed = controller.get_digest(
+            refresh="1",
+            date=None,
+            tag=None,
+            source=None,
+            limit="1",
+            snapshot_date=None,
+        )
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertEqual(refreshed.headers.get("Cache-Control"), "no-store")
+
     def test_export_csv_uses_csv_response_contract(self):
         controller = NewsController(RssDigestClient())
         response = controller.export_artifact(
             refresh=None,
-            artifact="source_differentiation_summary",
+            artifact="event_control_summary",
             export_format="csv",
             snapshot_date=None,
         )
@@ -83,6 +107,8 @@ class NewsControllerTests(unittest.TestCase):
         self.assertEqual(response.content_type, "text/csv; charset=utf-8")
         self.assertIn("Content-Disposition", response.headers)
         self.assertIsInstance(response.body, str)
+        self.assertIn("event_control_summary.csv", response.headers["Content-Disposition"])
+        self.assertIn("event_count", response.body)
 
 
 if __name__ == "__main__":

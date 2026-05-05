@@ -11,10 +11,11 @@ import {
   normalizeMode,
   selectSourceReliabilityView,
   selectedSnapshotDateValue,
+  selectedTagSliceFromQuery,
   selectedTopicFromQuery
 } from "../../../../lib/newsPageUtils";
-import { DataModeControls, EmptyState } from "../../../../components/news/NewsDashboardPrimitives";
-import { SourceEffectsBlock } from "../../../../components/news/SourceAnalysisBlocks";
+import { DataModeControls, EmptyState, SectionHeader } from "../../../../components/news/NewsDashboardPrimitives";
+import { SourceEffectsBlock, SourceReliabilityBlock } from "../../../../components/news/SourceAnalysisBlocks";
 import { normalizedSourceEffectsFilter } from "./shared";
 
 export async function render(searchParams) {
@@ -23,16 +24,23 @@ export async function render(searchParams) {
   const pooled = asObject(derived.source_lens_effects);
   const sourceReliability = asObject(derived.source_reliability);
   const topicControl = asObject(derived.source_topic_control);
+  const tagSlicedAnalysis = asObject(derived.tag_sliced_analysis);
   const topics = asArray(topicControl.topics);
+  const tagSlices = asArray(tagSlicedAnalysis.tags);
   const mode = normalizeMode(searchParams);
   const dataMode = normalizeDataMode(searchParams);
   const snapshotDateValue = selectedSnapshotDateValue(searchParams);
   const selectedTopic = selectedTopicFromQuery(searchParams, topics);
   const selectedTopicName = selectedTopic ? String(selectedTopic.topic || "") : "";
+  const selectedTagSlice = selectedTagSliceFromQuery(searchParams, tagSlices);
+  const selectedTagName = selectedTagSlice ? String(selectedTagSlice.tag || "") : "";
   const selectedTopicEffects = asObject(selectedTopic?.source_lens_effects);
+  const selectedTagEffects = asObject(selectedTagSlice?.source_lens_effects);
   const selectedTopicReason = String(selectedTopicEffects.reason || "");
+  const selectedTagReason = String(selectedTagEffects.reason || "");
   const isTopicUnavailable = String(selectedTopicEffects.status || "") !== "ok";
-  const reliabilityView = selectSourceReliabilityView(sourceReliability, mode, selectedTopicName);
+  const isTagUnavailable = String(selectedTagEffects.status || "") !== "ok";
+  const reliabilityView = selectSourceReliabilityView(sourceReliability, mode, selectedTopicName, selectedTagName);
   const { maxLenses, qThreshold } = normalizedSourceEffectsFilter(searchParams);
   const selectedLens = getQueryParam(searchParams, "lens");
   const sourceEffectsExtraParams = {
@@ -40,7 +48,7 @@ export async function render(searchParams) {
     q_threshold: qThreshold,
     lens: selectedLens
   };
-  const activeEffects = mode === "pooled" ? pooled : selectedTopicEffects;
+  const activeEffects = mode === "pooled" ? pooled : mode === "within-tag" ? selectedTagEffects : selectedTopicEffects;
   const availableLensOptions = asArray(activeEffects.rows)
     .map((row) => String(row?.lens || "").trim())
     .filter((lens) => lens);
@@ -50,14 +58,23 @@ export async function render(searchParams) {
     <>
       <DataModeControls
         searchParams={searchParams}
-        extraParams={{ mode, topic: selectedTopicName, ...sourceEffectsExtraParams }}
+        extraParams={{
+          mode,
+          topic: mode === "within-topic" ? selectedTopicName : "",
+          tag_slice: mode === "within-tag" ? selectedTagName : "",
+          ...sourceEffectsExtraParams
+        }}
       />
       <div className="panel">
-        <h3>Analysis Mode</h3>
+        <SectionHeader
+          kicker="Scope"
+          title="Analysis Mode"
+          summary="Switch between pooled, within-topic, and within-tag source comparisons without changing the underlying data mode."
+        />
         <div className="top-nav-links">
           <a
             className={`news-nav-link ${mode === "pooled" ? "active-link" : ""}`}
-            href={analysisModeQueryHref("pooled", selectedTopicName, dataMode, snapshotDateValue, sourceEffectsExtraParams)}
+            href={analysisModeQueryHref("pooled", "", dataMode, snapshotDateValue, sourceEffectsExtraParams)}
           >
             Pooled (topic-confounded)
           </a>
@@ -72,6 +89,15 @@ export async function render(searchParams) {
             )}
           >
             Within-topic
+          </a>
+          <a
+            className={`news-nav-link ${mode === "within-tag" ? "active-link" : ""}`}
+            href={analysisModeQueryHref("within-tag", "", dataMode, snapshotDateValue, {
+              ...sourceEffectsExtraParams,
+              tag_slice: selectedTagName
+            })}
+          >
+            Within-tag
           </a>
         </div>
         {mode === "within-topic" && topics.length > 0 ? (
@@ -102,14 +128,44 @@ export async function render(searchParams) {
             </div>
           </>
         ) : null}
+        {mode === "within-tag" && tagSlices.length > 0 ? (
+          <>
+            <p className="muted" style={{ marginTop: "10px" }}>
+              Tag slice
+            </p>
+            <div className="top-nav-links">
+              {tagSlices.slice(0, 24).map((tag) => {
+                const tagName = String(tag?.tag || "Unknown");
+                const selected = tagName === selectedTagName;
+                return (
+                  <a
+                    key={tagName}
+                    className={`news-nav-link ${selected ? "active-link" : ""}`}
+                    href={analysisModeQueryHref("within-tag", "", dataMode, snapshotDateValue, {
+                      ...sourceEffectsExtraParams,
+                      tag_slice: tagName
+                    })}
+                  >
+                    {tagName}
+                  </a>
+                );
+              })}
+            </div>
+          </>
+        ) : null}
       </div>
       <div className="panel">
-        <h3>Effect Filters</h3>
+        <SectionHeader
+          kicker="Controls"
+          title="Effect Filters"
+          summary="Control lens count, FDR threshold, and the detailed lens used for the source-mean comparison chart."
+        />
         <form method="get" className="inline-form-grid">
           <input type="hidden" name="data_mode" value={dataMode} />
           <input type="hidden" name="snapshot" value={snapshotDateValue} />
           <input type="hidden" name="mode" value={mode} />
-          <input type="hidden" name="topic" value={selectedTopicName} />
+          <input type="hidden" name="topic" value={mode === "within-topic" ? selectedTopicName : ""} />
+          <input type="hidden" name="tag_slice" value={mode === "within-tag" ? selectedTagName : ""} />
           <label className="muted" htmlFor="source-effects-max-lenses">
             Lenses shown
           </label>
@@ -151,6 +207,8 @@ export async function render(searchParams) {
         </form>
       </div>
 
+      <SourceReliabilityBlock reliability={sourceReliability} />
+
       {mode === "pooled" ? (
         <SourceEffectsBlock
           title="Pooled Source Effects"
@@ -161,7 +219,7 @@ export async function render(searchParams) {
           selectedLens={selectedLensValue}
           reliability={reliabilityView}
         />
-      ) : selectedTopic ? (
+      ) : mode === "within-topic" && selectedTopic ? (
         <SourceEffectsBlock
           title={`Within-Topic Source Effects: ${selectedTopicName}`}
           effects={selectedTopicEffects}
@@ -170,15 +228,32 @@ export async function render(searchParams) {
           selectedLens={selectedLensValue}
           reliability={reliabilityView}
         />
+      ) : mode === "within-tag" && selectedTagSlice ? (
+        <SourceEffectsBlock
+          title={`Within-Tag Source Effects: ${selectedTagName}`}
+          effects={selectedTagEffects}
+          maxLenses={maxLenses}
+          qThreshold={qThreshold}
+          selectedLens={selectedLensValue}
+          reliability={reliabilityView}
+        />
       ) : (
         <div className="panel">
-          <h3>Within-Topic Source Effects</h3>
+          <SectionHeader
+            kicker="Slice View"
+            title={mode === "within-tag" ? "Within-Tag Source Effects" : "Within-Topic Source Effects"}
+            summary="This slice is empty or currently unavailable under the selected constraints."
+          />
           <EmptyState />
         </div>
       )}
 
       <div className="panel">
-        <h3>Topic Slice Overview</h3>
+        <SectionHeader
+          kicker="Reference Table"
+          title="Topic Slice Overview"
+          summary="Quick scan of per-topic availability and the strongest lens effect present in each topic slice."
+        />
         {mode === "within-topic" && selectedTopic && isTopicUnavailable ? (
           <p className="muted">
             Selected topic is unavailable: {selectedTopicReason || "Insufficient data for this topic slice."}
@@ -205,6 +280,49 @@ export async function render(searchParams) {
                 return (
                   <tr key={String(topic.topic || "unknown-topic")}>
                     <td>{topic.topic || "Unknown"}</td>
+                    <td>{String(effects.status || "unavailable")}</td>
+                    <td>{formatNumber(rows.length)}</td>
+                    <td>{best?.lens || "n/a"}</td>
+                    <td>{formatDecimal(best?.eta_sq, 3)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+      <div className="panel">
+        <SectionHeader
+          kicker="Reference Table"
+          title="Tag Slice Overview"
+          summary="Quick scan of per-tag availability and the strongest lens effect present in each tag slice."
+        />
+        {mode === "within-tag" && selectedTagSlice && isTagUnavailable ? (
+          <p className="muted">
+            Selected tag is unavailable: {selectedTagReason || "Insufficient data for this tag slice."}
+          </p>
+        ) : null}
+        {tagSlices.length === 0 ? (
+          <EmptyState />
+        ) : (
+          <table className="news-table compact">
+            <thead>
+              <tr>
+                <th>Tag</th>
+                <th>Status</th>
+                <th>Lens Rows</th>
+                <th>Best Lens</th>
+                <th>Best eta²</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tagSlices.map((tag) => {
+                const effects = asObject(tag.source_lens_effects);
+                const rows = asArray(effects.rows);
+                const best = rows.length > 0 ? rows[0] : null;
+                return (
+                  <tr key={String(tag.tag || "unknown-tag")}>
+                    <td>{tag.tag || "Unknown"}</td>
                     <td>{String(effects.status || "unavailable")}</td>
                     <td>{formatNumber(rows.length)}</td>
                     <td>{best?.lens || "n/a"}</td>
