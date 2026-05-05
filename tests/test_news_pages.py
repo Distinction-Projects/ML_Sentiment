@@ -63,6 +63,11 @@ class NewsPageRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.content_type)
 
+    def test_news_group_latent_space_page_route(self):
+        response = self.client.get("/news/group-latent-space")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/html", response.content_type)
+
     def test_news_source_differentiation_page_route(self):
         response = self.client.get("/news/source-differentiation")
         self.assertEqual(response.status_code, 200)

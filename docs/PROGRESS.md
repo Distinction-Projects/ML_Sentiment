@@ -16,16 +16,17 @@ Use this file as persistent state for daily incremental agent runs.
 - Backlog source: `docs/BACKLOG.md`.
 
 ## Last Run
-- Date: 2026-05-01
-- Status: initialized progress tracking.
-- Changes: added this persistent progress file and linked it from `.rules`.
-- Validation: documentation-only change; no runtime tests required.
+- Date: 2026-05-05
+- Status: narrowed the group selector to the active cluster with an explicit all-groups escape hatch.
+- Changes: kept `/news/group-latent-space` read-only, added an `All groups` cluster option, filtered the `Group` dropdown to the currently selected cluster, preserved the existing cluster-to-group synchronization, and extended focused helper tests for cluster filtering behavior.
+- Validation:
+  - `.venv/bin/python -m py_compile src/pages/news_group_latent_space.py tests/test_news_group_latent_space.py tests/test_news_pages.py`
+  - `.venv/bin/python -m unittest tests.test_news_group_latent_space tests.test_news_pages -v`
 
 ## Next Concrete Step
-- Choose one high-value visual-analysis or dashboard-polish item from `docs/BACKLOG.md`.
-- Implement one small slice.
-- Run the relevant focused validation.
-- Update this file with what changed and the next step.
+- Add a small status hint on `/news/group-latent-space` when `All groups` is active versus a specific cluster so the shrinking `Group` option set is obvious.
+- Keep the current read-only page structure and reuse the existing dropdown state instead of adding backend data.
+- Add one focused page test for the new filter-state messaging rather than broad callback coverage.
 
 ## Notes For Future Agents
 - Prefer additive `derived.*` backend fields for reusable analysis.
