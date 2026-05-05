@@ -342,7 +342,7 @@ class NewsEndpointTests(unittest.TestCase):
         self.assertIn("tag_totals", chart_aggregates)
         self.assertIn("score_status_by_source", chart_aggregates)
         self.assertEqual(chart_aggregates["source_tag_totals"][0]["source"], "PBS NewsHour")
-        self.assertEqual(chart_aggregates["source_tag_totals"][0]["count"], 3)
+        self.assertEqual(chart_aggregates["source_tag_totals"][0]["count"], 2)
         self.assertEqual(chart_aggregates["tag_totals"][0]["tag"], "OpenAI")
         self.assertEqual(chart_aggregates["tag_totals"][0]["count"], 2)
         source_tag_views = stats_payload["data"]["derived"]["source_tag_views"]
@@ -354,10 +354,10 @@ class NewsEndpointTests(unittest.TestCase):
         self.assertEqual(source_tag_views["tag_labels"][0], "OpenAI")
         self.assertEqual(source_tag_views["source_rows"][0]["source"], "PBS NewsHour")
         self.assertEqual(source_tag_views["summary"]["source_count"], 2)
-        self.assertEqual(source_tag_views["summary"]["tag_count"], 4)
-        self.assertEqual(source_tag_views["summary"]["matrix_rows"], 5)
-        self.assertEqual(source_tag_views["summary"]["non_zero_cells"], 5)
-        self.assertEqual(source_tag_views["summary"]["total_assignments"], 5)
+        self.assertEqual(source_tag_views["summary"]["tag_count"], 3)
+        self.assertEqual(source_tag_views["summary"]["matrix_rows"], 4)
+        self.assertEqual(source_tag_views["summary"]["non_zero_cells"], 4)
+        self.assertEqual(source_tag_views["summary"]["total_assignments"], 4)
 
         health = self.client.get("/health/news-freshness")
         self.assertEqual(health.status_code, 200)
@@ -376,6 +376,7 @@ class NewsEndpointTests(unittest.TestCase):
         self.assertIn("articles", upstream)
         self.assertEqual(len(upstream["articles"]), 3)
         self.assertEqual(upstream["articles"][0]["id"], "a-1")
+        self.assertNotIn("General", upstream["articles"][0].get("topic_tags", []))
 
         snapshot_response = self.client.get(f"/api/news/upstream?snapshot_date={self.snapshot_date}")
         self.assertEqual(snapshot_response.status_code, 200)

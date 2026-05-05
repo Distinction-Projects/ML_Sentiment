@@ -1,4 +1,5 @@
 from urllib.parse import urlencode
+import unicodedata
 
 import dash
 import dash_bootstrap_components as dbc
@@ -54,12 +55,33 @@ def _source_figure(source_counts: list[dict]) -> go.Figure:
     figure.update_layout(title="Articles by Source", template="plotly_white")
     return figure
 
+
+def _normalized_tag_label(value: object) -> str:
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    # Strip control/format chars (e.g., zero-width marks) so hidden variants
+    # of "general" do not slip into the chart.
+    text = "".join(char for char in text if unicodedata.category(char)[0] != "C")
+    return text.strip()
+
+
+def _is_excluded_general_tag(value: object) -> bool:
+    label = _normalized_tag_label(value)
+    compact = "".join(char for char in label.casefold() if char.isalnum())
+    return compact == "general"
+
+
 def _tag_figure(tag_counts: list[dict]) -> go.Figure:
-    # Filter out 'general' tag (including case/whitespace variants) and take top 12.
-    filtered_tags = [
-        row for row in tag_counts if str(row.get("tag", "")).strip().casefold() != "general"
-    ]
-    top_tags = filtered_tags[:12]
+    # Filter out "general" tag variants and keep top 12 by count.
+    sanitized_rows: list[dict[str, object]] = []
+    for row in tag_counts:
+        if not isinstance(row, dict):
+            continue
+        tag_label = _normalized_tag_label(row.get("tag", ""))
+        if not tag_label or _is_excluded_general_tag(tag_label):
+            continue
+        sanitized_rows.append({"tag": tag_label, "count": row.get("count", 0)})
+
+    top_tags = sanitized_rows[:12]
     if not top_tags:
         return _empty_figure("Top Tags")
     figure = go.Figure(

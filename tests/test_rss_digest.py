@@ -177,7 +177,7 @@ class RssDigestServiceTests(unittest.TestCase):
         self.assertEqual(len(chart_aggregates["tag_count_distribution"]), 6)
         self.assertEqual(len(chart_aggregates["publish_hour_counts_utc"]), 24)
         self.assertEqual(chart_aggregates["source_tag_totals"][0]["source"], "PBS NewsHour")
-        self.assertEqual(chart_aggregates["source_tag_totals"][0]["count"], 3)
+        self.assertEqual(chart_aggregates["source_tag_totals"][0]["count"], 2)
         self.assertEqual(chart_aggregates["source_tag_totals"][1]["source"], "NPR")
         self.assertEqual(chart_aggregates["source_tag_totals"][1]["count"], 2)
         self.assertEqual(chart_aggregates["tag_totals"][0]["tag"], "OpenAI")
@@ -190,12 +190,12 @@ class RssDigestServiceTests(unittest.TestCase):
         self.assertEqual(source_tag_views["source_labels"][0], "PBS NewsHour")
         self.assertEqual(source_tag_views["tag_labels"][0], "OpenAI")
         self.assertEqual(source_tag_views["source_rows"][0]["source"], "PBS NewsHour")
-        self.assertEqual(source_tag_views["source_rows"][0]["count"], 3)
+        self.assertEqual(source_tag_views["source_rows"][0]["count"], 2)
         self.assertEqual(source_tag_views["summary"]["source_count"], 2)
-        self.assertEqual(source_tag_views["summary"]["tag_count"], 4)
-        self.assertEqual(source_tag_views["summary"]["matrix_rows"], 5)
-        self.assertEqual(source_tag_views["summary"]["non_zero_cells"], 5)
-        self.assertEqual(source_tag_views["summary"]["total_assignments"], 5)
+        self.assertEqual(source_tag_views["summary"]["tag_count"], 3)
+        self.assertEqual(source_tag_views["summary"]["matrix_rows"], 4)
+        self.assertEqual(source_tag_views["summary"]["non_zero_cells"], 4)
+        self.assertEqual(source_tag_views["summary"]["total_assignments"], 4)
 
         self.assertEqual(
             sum(item["count"] for item in chart_aggregates["tag_count_distribution"]),
@@ -418,7 +418,7 @@ class RssDigestServiceTests(unittest.TestCase):
         self.assertEqual(data_quality["summary"]["missing_ai_summary"], 0)
         self.assertEqual(data_quality["summary"]["missing_published"], 0)
         self.assertEqual(data_quality["summary"]["missing_source"], 0)
-        self.assertAlmostEqual(float(data_quality["summary"]["average_tags"]), 2.5, places=6)
+        self.assertAlmostEqual(float(data_quality["summary"]["average_tags"]), 2.0, places=6)
         coverage_by_field = {row["field"]: row for row in data_quality["field_coverage"]}
         self.assertEqual(coverage_by_field["Title"]["present"], 2)
         self.assertEqual(coverage_by_field["Lens Scores"]["present"], 1)

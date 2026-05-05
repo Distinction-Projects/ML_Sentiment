@@ -22,11 +22,6 @@ source .venv/bin/activate
 uvicorn src.api.fastapi_app:app --reload --port 9000
 ```
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-uvicorn src.api.fastapi_app:app --reload --port 9000
-```
-
 In a second terminal:
 
 ```bash
@@ -34,13 +29,6 @@ cd frontend-node
 cp .env.example .env.local
 npm install
 npm run dev
-```
-
-```powershell
-cd frontend-node
-Copy-Item .env.example .env.local -ErrorAction SilentlyContinue
-npm.cmd install
-npm.cmd run dev
 ```
 
 Open:

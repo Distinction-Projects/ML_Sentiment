@@ -7,6 +7,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from src.services.rss_digest import strip_excluded_tags_from_payload
+
 
 DEFAULT_NEWS_STATS_SNAPSHOT_PATH = "data/processed/news_analytics_snapshot.json"
 _SNAPSHOT_CACHE_LOCK = threading.Lock()
@@ -69,6 +71,7 @@ def load_precomputed_stats_response(path: Path | None = None) -> dict[str, Any]:
         raise PrecomputedStatsError(f"Precomputed stats snapshot could not be read: {exc}") from exc
 
     validated = deepcopy(_validate_stats_envelope(payload))
+    validated = strip_excluded_tags_from_payload(validated)
     meta = validated.get("meta")
     if not isinstance(meta, dict):
         meta = {}

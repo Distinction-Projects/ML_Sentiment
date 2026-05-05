@@ -8,7 +8,9 @@ from src.services.database import _connect_kwargs, _import_psycopg, database_url
 from src.services.rss_digest import (
     RssDigestNotFoundError,
     RssDigestUpstreamError,
+    derive_stats,
     parse_snapshot_date,
+    sanitize_record_tags,
     sort_records_desc,
 )
 
@@ -114,21 +116,9 @@ class PostgresNewsClient:
                 )
                 articles = [_json_value(row[0]) for row in cur.fetchall()]
 
-                cur.execute(
-                    """
-                    SELECT payload
-                    FROM public.derived_metrics
-                    WHERE snapshot_key = %s
-                      AND metric_key = 'news_stats'
-                    ORDER BY created_at DESC
-                    LIMIT 1;
-                    """,
-                    (parsed_snapshot or "current",),
-                )
-                stats_row = cur.fetchone()
-                stats = _json_value(stats_row[0]) if stats_row else {}
-
-        ordered_articles = sort_records_desc([article for article in articles if isinstance(article, dict)])
+        sanitized_articles = [sanitize_record_tags(article) for article in articles if isinstance(article, dict)]
+        ordered_articles = sort_records_desc(sanitized_articles)
+        stats = derive_stats(ordered_articles, {"items": ordered_articles})
         generated_at = _as_iso_utc(import_row[6])
         fetched_at = _as_iso_utc(import_row[9])
         return {

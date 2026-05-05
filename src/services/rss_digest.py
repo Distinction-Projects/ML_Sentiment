@@ -58,6 +58,8 @@ TIMESTAMP_KEYS = (
 
 TAG_KEYS = ("tags", "tag", "topics", "topic", "keywords")
 SOURCE_KEYS = ("source", "source_name", "sourceName", "publisher", "feed", "domain")
+EXCLUDED_TAG_VALUES = {"general"}
+_DROP_ROW = object()
 
 
 class RssDigestError(RuntimeError):
@@ -260,6 +262,85 @@ def _unique_case_insensitive(values: list[str]) -> list[str]:
     return unique
 
 
+def _is_excluded_tag(value: Any) -> bool:
+    text = _clean_text(value)
+    return bool(text and text.casefold() in EXCLUDED_TAG_VALUES)
+
+
+def _filter_excluded_tags(values: list[str]) -> list[str]:
+    return _unique_case_insensitive([value for value in values if not _is_excluded_tag(value)])
+
+
+def sanitize_record_tags(record: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(record)
+    ai_tags = _filter_excluded_tags(_values_to_strings(record.get("ai_tags")))
+    topic_tags = _filter_excluded_tags(_values_to_strings(record.get("topic_tags")))
+    tags_source_values = _values_to_strings(record.get("tags"))
+    filtered_source_tags = _filter_excluded_tags(tags_source_values)
+    all_tags = filtered_source_tags if filtered_source_tags else _filter_excluded_tags(ai_tags + topic_tags)
+
+    if "ai_tags" in record or ai_tags:
+        sanitized["ai_tags"] = ai_tags
+    if "topic_tags" in record or topic_tags:
+        sanitized["topic_tags"] = topic_tags
+    if "tags" in record or all_tags:
+        sanitized["tags"] = all_tags
+    if _is_excluded_tag(record.get("tag")):
+        sanitized["tag"] = None
+    return sanitized
+
+
+def _is_general_tag_row(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if not _is_excluded_tag(value.get("tag")):
+        return False
+    article_identity_keys = {"id", "title", "link", "published", "summary", "source", "feed", "scraped"}
+    if any(key in value for key in article_identity_keys):
+        return False
+    row_signal_keys = {"count", "n_articles", "daily_counts", "source_differentiation", "source_lens_effects"}
+    return any(key in value for key in row_signal_keys) or set(value.keys()) == {"tag"}
+
+
+def _sanitize_tag_tree(value: Any) -> Any:
+    if isinstance(value, list):
+        sanitized_list: list[Any] = []
+        for item in value:
+            if isinstance(item, str) and _is_excluded_tag(item):
+                continue
+            if _is_general_tag_row(item):
+                continue
+            sanitized_item = _sanitize_tag_tree(item)
+            if sanitized_item is _DROP_ROW:
+                continue
+            sanitized_list.append(sanitized_item)
+        return sanitized_list
+
+    if isinstance(value, dict):
+        if _is_general_tag_row(value):
+            return _DROP_ROW
+
+        sanitized_obj: dict[str, Any] = {}
+        for key, raw in value.items():
+            if key in {"ai_tags", "topic_tags", "tags", "tag_labels"}:
+                sanitized_obj[key] = _filter_excluded_tags(_values_to_strings(raw))
+                continue
+            if key == "tag" and _is_excluded_tag(raw):
+                continue
+            sanitized_value = _sanitize_tag_tree(raw)
+            if sanitized_value is _DROP_ROW:
+                continue
+            sanitized_obj[key] = sanitized_value
+        return sanitized_obj
+
+    return value
+
+
+def strip_excluded_tags_from_payload(payload: Any) -> Any:
+    sanitized = _sanitize_tag_tree(payload)
+    return {} if sanitized is _DROP_ROW else sanitized
+
+
 def _scrape_succeeded(article: dict[str, Any]) -> bool:
     scrape_error = _clean_text(article.get("scrape_error"))
     if scrape_error:
@@ -284,9 +365,9 @@ def normalize_article(article: dict[str, Any]) -> dict[str, Any]:
     feed = article.get("feed")
     feed_obj = feed if isinstance(feed, dict) else {}
 
-    ai_tags = _unique_case_insensitive(_values_to_strings(article.get("ai_tags")))
-    topic_tags = _unique_case_insensitive(_values_to_strings(article.get("topic_tags")))
-    all_tags = _unique_case_insensitive(ai_tags + topic_tags)
+    ai_tags = _filter_excluded_tags(_values_to_strings(article.get("ai_tags")))
+    topic_tags = _filter_excluded_tags(_values_to_strings(article.get("topic_tags")))
+    all_tags = _filter_excluded_tags(ai_tags + topic_tags)
 
     published_value = article.get("published")
     published_dt = parse_datetime(published_value)
@@ -358,9 +439,9 @@ def normalize_articles(payload: Any) -> list[dict[str, Any]]:
 def _tag_values_for_record(record: dict[str, Any]) -> list[str]:
     tags = _values_to_strings(record.get("tags"))
     if tags:
-        return _unique_case_insensitive(tags)
+        return _filter_excluded_tags(tags)
     derived = _values_to_strings(record.get("ai_tags")) + _values_to_strings(record.get("topic_tags"))
-    return _unique_case_insensitive(derived)
+    return _filter_excluded_tags(derived)
 
 
 def _source_values_for_record(record: dict[str, Any]) -> list[str]:
@@ -3379,7 +3460,7 @@ def _topic_memberships_from_record(
     record: dict[str, Any],
     topic_display_labels: dict[str, str],
 ) -> list[str]:
-    topic_values = _unique_case_insensitive(_values_to_strings(record.get("topic_tags")))
+    topic_values = _filter_excluded_tags(_values_to_strings(record.get("topic_tags")))
     topic_keys: list[str] = []
     for topic_value in topic_values:
         topic_text = topic_value.strip()
@@ -3401,7 +3482,7 @@ def _tag_memberships_from_record(
     record: dict[str, Any],
     tag_display_labels: dict[str, str],
 ) -> list[str]:
-    tag_values = _unique_case_insensitive(_values_to_strings(record.get("ai_tags")))
+    tag_values = _filter_excluded_tags(_values_to_strings(record.get("ai_tags")))
     tag_keys: list[str] = []
     for tag_value in tag_values:
         tag_text = tag_value.strip()
@@ -5866,6 +5947,7 @@ class RssDigestClient:
         digest = payload.get("digest") if isinstance(payload, dict) else None
         digest_obj = digest if isinstance(digest, dict) else {}
         digest_generated_at = parse_datetime(digest_obj.get("generated_at"))
+        sanitized_payload = strip_excluded_tags_from_payload(payload)
 
         input_records = extract_records(payload)
         records = normalize_articles(payload)
@@ -5874,7 +5956,7 @@ class RssDigestClient:
         excluded_unscraped_articles = len(input_records) - len(ordered_records)
 
         return {
-            "upstream_payload": payload,
+            "upstream_payload": sanitized_payload,
             "articles_normalized": ordered_records,
             "stats": stats,
             "input_articles_count": len(input_records),
