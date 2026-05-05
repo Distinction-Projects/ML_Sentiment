@@ -264,7 +264,6 @@ def load_news_stats(_load_tick, _refresh_clicks, data_mode, snapshot_date):
         _daily_figure(daily_counts),
     )
 
-
 @callback(
     Output("news-stats-snapshot-date", "disabled"),
     Input("news-stats-data-mode", "value"),
