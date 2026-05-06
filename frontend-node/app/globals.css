@@ -1,5 +1,7 @@
 :root {
   color-scheme: dark;
+  --shell-max-width: 1560px;
+  --shell-gutter: clamp(18px, 2.4vw, 36px);
   --page-bg: #09111a;
   --page-bg-alt: #0f1724;
   --surface: rgba(17, 27, 42, 0.82);
@@ -36,9 +38,10 @@ body {
 }
 
 .top-nav {
-  max-width: 1080px;
+  width: min(100%, var(--shell-max-width));
+  box-sizing: border-box;
   margin: 0 auto;
-  padding: 14px 24px;
+  padding: 14px var(--shell-gutter);
   display: flex;
   align-items: center;
   justify-content: flex-start;
@@ -110,9 +113,10 @@ body {
 }
 
 main {
-  max-width: 1080px;
+  width: min(100%, var(--shell-max-width));
+  box-sizing: border-box;
   margin: 0 auto;
-  padding: 34px 24px 48px;
+  padding: 34px var(--shell-gutter) 48px;
 }
 
 .app-shell {
@@ -215,7 +219,7 @@ code {
 }
 
 .compact-copy {
-  max-width: 420px;
+  max-width: 540px;
   margin: 2px 0 0;
   line-height: 1.45;
 }
@@ -478,7 +482,7 @@ code {
 }
 
 .home-hero {
-  max-width: 780px;
+  max-width: 960px;
 }
 
 .home-hero-actions {
@@ -871,7 +875,7 @@ code {
 }
 
 .workflow-box {
-  width: min(100%, 860px);
+  width: min(100%, 1120px);
   border: 1px solid rgba(70, 101, 143, 0.26);
   border-radius: 14px;
   background: rgba(20, 34, 54, 0.88);
