@@ -456,6 +456,30 @@ def _cluster_membership_summary(cluster_row: dict | None):
     )
 
 
+def _cluster_scope_summary(cluster_rows: list[dict], selected_cluster_row: dict | None):
+    normalized_rows = [row for row in cluster_rows if isinstance(row, dict)]
+    if isinstance(selected_cluster_row, dict):
+        cluster_label = str(selected_cluster_row.get("label") or selected_cluster_row.get("cluster_id") or "Selected cluster")
+        group_count = int(selected_cluster_row.get("n_groups") or 0)
+        article_count = int(selected_cluster_row.get("n_articles") or 0)
+        summary = (
+            f"Scope: {cluster_label}. "
+            f"{group_count} group{'' if group_count == 1 else 's'}, "
+            f"{article_count} article{'' if article_count == 1 else 's'}."
+        )
+    else:
+        cluster_count = len(normalized_rows)
+        group_count = sum(int(row.get("n_groups") or 0) for row in normalized_rows)
+        article_count = sum(int(row.get("n_articles") or 0) for row in normalized_rows)
+        summary = (
+            f"Scope: All clusters. "
+            f"{cluster_count} cluster{'' if cluster_count == 1 else 's'}, "
+            f"{group_count} group{'' if group_count == 1 else 's'}, "
+            f"{article_count} article{'' if article_count == 1 else 's'}."
+        )
+    return html.P(summary, className="text-muted mb-2")
+
+
 def _cluster_overview_table(cluster_rows: list[dict], selected_cluster_row: dict | None):
     if not cluster_rows:
         return dbc.Alert("No cluster rows are available for the selected group type.", color="warning", className="mb-0")
@@ -503,6 +527,7 @@ def _cluster_overview_table(cluster_rows: list[dict], selected_cluster_row: dict
         dbc.CardBody(
             [
                 html.H5("Cluster Overview", className="card-title"),
+                _cluster_scope_summary(cluster_rows, selected_cluster_row),
                 dbc.Table(
                     [
                         html.Thead(

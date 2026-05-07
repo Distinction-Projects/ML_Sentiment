@@ -11,6 +11,7 @@ from src.pages.news_group_latent_space import (
     _cluster_membership_summary,
     _cluster_options,
     _cluster_overview_table,
+    _cluster_scope_summary,
     _group_scope_summary,
     _group_table,
     _group_options,
@@ -239,6 +240,19 @@ class NewsGroupLatentSpaceTests(unittest.TestCase):
             row for row in _find_components(component, html.Tr) if getattr(row, "className", None) == "table-primary"
         ]
         self.assertEqual(len(highlighted_rows), 1)
+
+    def test_cluster_scope_summary_uses_selected_cluster_counts(self):
+        summary = _cluster_scope_summary(
+            [
+                {"cluster_id": "source-cluster-1", "label": "Source A, Source B", "n_groups": 2, "n_articles": 11},
+                {"cluster_id": "source-cluster-2", "label": "Source C, Source D", "n_groups": 2, "n_articles": 9},
+            ],
+            {"cluster_id": "source-cluster-2", "label": "Source C, Source D", "n_groups": 2, "n_articles": 9},
+        )
+
+        rendered_text = " ".join(str(node) for node in _iter_children(summary) if isinstance(node, str))
+        self.assertIn("Scope: Source C, Source D.", rendered_text)
+        self.assertIn("2 groups, 9 articles.", rendered_text)
 
     def test_group_table_renders_only_cluster_filtered_rows(self):
         rows = [
