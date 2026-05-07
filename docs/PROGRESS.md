@@ -16,17 +16,17 @@ Use this file as persistent state for daily incremental agent runs.
 - Backlog source: `docs/BACKLOG.md`.
 
 ## Last Run
-- Date: 2026-05-05
-- Status: narrowed the group selector to the active cluster with an explicit all-groups escape hatch.
-- Changes: kept `/news/group-latent-space` read-only, added an `All groups` cluster option, filtered the `Group` dropdown to the currently selected cluster, preserved the existing cluster-to-group synchronization, and extended focused helper tests for cluster filtering behavior.
+- Date: 2026-05-06
+- Status: added visible cluster-filter messaging so the shrinking `Group` option set is explicit on `/news/group-latent-space`.
+- Changes: kept `/news/group-latent-space` read-only, added a small `Cluster filter` status hint for both `All groups` and specific-cluster states, composed that hint under the existing page status alert, and extended focused helper tests for the new copy.
 - Validation:
-  - `.venv/bin/python -m py_compile src/pages/news_group_latent_space.py tests/test_news_group_latent_space.py tests/test_news_pages.py`
-  - `.venv/bin/python -m unittest tests.test_news_group_latent_space tests.test_news_pages -v`
+  - `.venv/bin/python -m py_compile src/pages/news_group_latent_space.py tests/test_news_group_latent_space.py`
+  - `.venv/bin/python -m unittest tests.test_news_group_latent_space -v`
 
 ## Next Concrete Step
-- Add a small status hint on `/news/group-latent-space` when `All groups` is active versus a specific cluster so the shrinking `Group` option set is obvious.
-- Keep the current read-only page structure and reuse the existing dropdown state instead of adding backend data.
-- Add one focused page test for the new filter-state messaging rather than broad callback coverage.
+- Mirror the active cluster filter in the `Top Groups` table on `/news/group-latent-space` so the table matches the `Group` dropdown scope.
+- Keep the PCA/MDS charts unchanged for that step to limit behavior drift.
+- Add one focused helper test covering the filtered table rows instead of broad callback coverage.
 
 ## Notes For Future Agents
 - Prefer additive `derived.*` backend fields for reusable analysis.

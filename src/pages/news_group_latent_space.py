@@ -171,6 +171,29 @@ def _selected_cluster_row(
     return None
 
 
+def _cluster_filter_hint(
+    all_rows: list[dict],
+    filtered_rows: list[dict],
+    selected_cluster_row: dict | None,
+):
+    total_options = len([row for row in all_rows if isinstance(row, dict)])
+    filtered_options = len([row for row in filtered_rows if isinstance(row, dict)])
+    if isinstance(selected_cluster_row, dict):
+        cluster_label = str(selected_cluster_row.get("label") or selected_cluster_row.get("cluster_id") or "Selected cluster")
+        message = (
+            f"Cluster filter: {cluster_label}. "
+            f"The Group menu is limited to {filtered_options} option"
+            f"{'' if filtered_options == 1 else 's'} in this cluster."
+        )
+    else:
+        message = (
+            f"Cluster filter: All groups. "
+            f"The Group menu shows all {total_options} available option"
+            f"{'' if total_options == 1 else 's'}."
+        )
+    return dbc.Alert(message, color="light", className="mb-0 py-2")
+
+
 def _summary_cards(group_type: str, group_latent: dict) -> list:
     summary = group_latent.get("summary") if isinstance(group_latent.get("summary"), dict) else {}
     config = group_latent.get("config") if isinstance(group_latent.get("config"), dict) else {}
@@ -824,9 +847,16 @@ def load_news_group_latent_space(
         ],
         color="info",
     )
+    status_panel = html.Div(
+        [
+            status_alert,
+            _cluster_filter_hint(rows, filtered_rows, selected_cluster),
+        ],
+        className="d-grid gap-2",
+    )
 
     return (
-        status_alert,
+        status_panel,
         _summary_cards(effective_group_type, group_latent),
         cluster_options,
         selected_cluster_value,

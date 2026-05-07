@@ -7,6 +7,7 @@ import src.app  # noqa: F401
 from src.pages.news_group_latent_space import (
     ALL_GROUPS_CLUSTER_VALUE,
     _centroid_figure,
+    _cluster_filter_hint,
     _cluster_membership_summary,
     _cluster_options,
     _cluster_overview_table,
@@ -134,6 +135,28 @@ class NewsGroupLatentSpaceTests(unittest.TestCase):
             _group_rows_for_cluster(rows, ALL_GROUPS_CLUSTER_VALUE),
             rows,
         )
+
+    def test_cluster_filter_hint_describes_all_groups_and_selected_cluster_states(self):
+        rows = [
+            {"group": "Source A", "group_key": "source-a", "cluster_id": "source-cluster-1"},
+            {"group": "Source B", "group_key": "source-b", "cluster_id": "source-cluster-1"},
+            {"group": "Source C", "group_key": "source-c", "cluster_id": "source-cluster-2"},
+        ]
+
+        all_groups_hint = _cluster_filter_hint(rows, rows, None)
+        filtered_hint = _cluster_filter_hint(
+            rows,
+            rows[:2],
+            {"cluster_id": "source-cluster-1", "label": "Source A, Source B"},
+        )
+
+        all_groups_text = " ".join(str(node) for node in _iter_children(all_groups_hint) if isinstance(node, str))
+        filtered_text = " ".join(str(node) for node in _iter_children(filtered_hint) if isinstance(node, str))
+
+        self.assertIn("Cluster filter: All groups.", all_groups_text)
+        self.assertIn("shows all 3 available options.", all_groups_text)
+        self.assertIn("Cluster filter: Source A, Source B.", filtered_text)
+        self.assertIn("limited to 2 options in this cluster.", filtered_text)
 
     def test_centroid_figure_uses_only_rows_with_coordinates(self):
         figure = _centroid_figure(
