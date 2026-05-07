@@ -11,6 +11,8 @@ from src.pages.news_group_latent_space import (
     _cluster_membership_summary,
     _cluster_options,
     _cluster_overview_table,
+    _group_scope_summary,
+    _group_table,
     _group_options,
     _group_rows_for_cluster,
     _selected_cluster_row,
@@ -237,6 +239,43 @@ class NewsGroupLatentSpaceTests(unittest.TestCase):
             row for row in _find_components(component, html.Tr) if getattr(row, "className", None) == "table-primary"
         ]
         self.assertEqual(len(highlighted_rows), 1)
+
+    def test_group_table_renders_only_cluster_filtered_rows(self):
+        rows = [
+            {"group": "Source A", "group_key": "source-a", "status": "ok", "n_articles": 6, "cluster_id": "source-cluster-1", "cluster_label": "Cluster 1", "pc1": 0.31, "pc2": 0.18},
+            {"group": "Source B", "group_key": "source-b", "status": "ok", "n_articles": 5, "cluster_id": "source-cluster-1", "cluster_label": "Cluster 1", "pc1": 0.27, "pc2": 0.12},
+            {"group": "Source C", "group_key": "source-c", "status": "low_sample", "n_articles": 2, "cluster_id": "source-cluster-2", "cluster_label": "Cluster 2", "pc1": -0.22, "pc2": 0.44},
+        ]
+
+        filtered_rows = _group_rows_for_cluster(rows, "source-cluster-2")
+        component = _group_table(filtered_rows, "source-c")
+
+        self.assertIsInstance(component, dbc.Card)
+        rendered_text = " ".join(str(node) for node in _iter_children(component) if isinstance(node, str))
+        self.assertIn("Top Groups", rendered_text)
+        self.assertIn("Source C", rendered_text)
+        self.assertNotIn("Source A", rendered_text)
+        self.assertNotIn("Source B", rendered_text)
+
+        highlighted_rows = [
+            row for row in _find_components(component, html.Tr) if getattr(row, "className", None) == "table-primary"
+        ]
+        self.assertEqual(len(highlighted_rows), 1)
+
+    def test_group_scope_summary_uses_selected_cluster_counts(self):
+        rows = [
+            {"group": "Source A", "group_key": "source-a", "n_articles": 6},
+            {"group": "Source B", "group_key": "source-b", "n_articles": 5},
+        ]
+
+        summary = _group_scope_summary(
+            rows,
+            {"cluster_id": "source-cluster-1", "label": "Source A, Source B", "n_groups": 2, "n_articles": 11},
+        )
+
+        rendered_text = " ".join(str(node) for node in _iter_children(summary) if isinstance(node, str))
+        self.assertIn("Scope: Source A, Source B.", rendered_text)
+        self.assertIn("2 groups, 11 articles.", rendered_text)
 
 
 if __name__ == "__main__":

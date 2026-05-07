@@ -579,7 +579,30 @@ def _lens_deviation_table(row: dict | None):
     )
 
 
-def _group_table(rows: list[dict], selected_group_key: str | None):
+def _group_scope_summary(rows: list[dict], selected_cluster_row: dict | None = None):
+    filtered_rows = [row for row in rows if isinstance(row, dict)]
+    group_count = int(selected_cluster_row.get("n_groups") or len(filtered_rows)) if isinstance(selected_cluster_row, dict) else len(filtered_rows)
+    article_count = (
+        int(selected_cluster_row.get("n_articles") or 0)
+        if isinstance(selected_cluster_row, dict)
+        else sum(int(row.get("n_articles") or 0) for row in filtered_rows)
+    )
+    scope_label = (
+        str(selected_cluster_row.get("label") or selected_cluster_row.get("cluster_id") or "Selected cluster")
+        if isinstance(selected_cluster_row, dict)
+        else "All groups"
+    )
+    summary = (
+        f"Scope: {scope_label}. "
+        f"{group_count} group{'' if group_count == 1 else 's'}, "
+        f"{article_count} article{'' if article_count == 1 else 's'}."
+    )
+    if len(filtered_rows) > 15:
+        summary += " Showing the first 15 groups."
+    return html.P(summary, className="text-muted mb-2")
+
+
+def _group_table(rows: list[dict], selected_group_key: str | None, selected_cluster_row: dict | None = None):
     if not rows:
         return dbc.Alert("No group rows are available for the selected group type.", color="warning", className="mb-0")
 
@@ -608,6 +631,7 @@ def _group_table(rows: list[dict], selected_group_key: str | None):
         dbc.CardBody(
             [
                 html.H5("Top Groups", className="card-title"),
+                _group_scope_summary(rows, selected_cluster_row),
                 dbc.Table(
                     [
                         html.Thead(
@@ -864,7 +888,7 @@ def load_news_group_latent_space(
         selected_value,
         _centroid_figure(rows, selected_value, "pc1", "pc2", "PCA Group Centroids"),
         _centroid_figure(rows, selected_value, "mds1", "mds2", "MDS Group Centroids"),
-        _group_table(rows, selected_value),
+        _group_table(filtered_rows, selected_value, selected_cluster),
         html.Div(
             [
                 _cluster_overview_table(cluster_rows, selected_cluster),
