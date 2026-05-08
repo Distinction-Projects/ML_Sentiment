@@ -83,6 +83,140 @@ SAMPLE_PAYLOAD = {
 }
 
 
+def _coverage_gap_temporal_payload() -> dict:
+    articles = []
+    article_specs = [
+        ("2026-04-01", "Source A", ["Policy"], ["Risk"], 82.0, 24.0, 28.0),
+        ("2026-04-03", "Source A", ["Policy"], ["Risk"], 80.0, 26.0, 30.0),
+        ("2026-04-02", "Source B", ["Markets"], ["Growth"], 44.0, 76.0, 38.0),
+        ("2026-04-04", "Source B", ["Markets"], ["Growth"], 42.0, 78.0, 40.0),
+        ("2026-04-07", "Source B", ["Markets"], ["Growth"], 46.0, 74.0, 42.0),
+        ("2026-04-09", "Source B", ["Markets"], ["Growth"], 48.0, 72.0, 44.0),
+        ("2026-04-14", "Source A", ["Policy"], ["Risk"], 76.0, 30.0, 34.0),
+        ("2026-04-16", "Source A", ["Policy"], ["Risk"], 74.0, 32.0, 36.0),
+        ("2026-04-15", "Source B", ["Markets"], ["Growth"], 50.0, 70.0, 46.0),
+        ("2026-04-17", "Source B", ["Markets"], ["Growth"], 52.0, 68.0, 48.0),
+    ]
+    for idx, (published, source_name, topic_tags, ai_tags, evidence, impact, novelty) in enumerate(article_specs):
+        articles.append(
+            {
+                "id": f"coverage-gap-endpoint-{idx}",
+                "title": f"Coverage gap endpoint {idx}",
+                "link": f"https://example.com/coverage-gap/{idx}",
+                "published": f"{published}T00:00:00Z",
+                "summary": f"Summary {idx}",
+                "ai_summary": f"AI Summary {idx}",
+                "ai_tags": ai_tags,
+                "topic_tags": topic_tags,
+                "source": {"id": source_name.lower().replace(' ', '-'), "name": source_name},
+                "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                "scraped": {"title": f"Coverage gap endpoint {idx}", "body_text": "Body"},
+                "scrape_error": None,
+                "score": {
+                    "value": 15.0,
+                    "max_value": 20.0,
+                    "percent": 75.0,
+                    "rubric_count": 3,
+                    "lens_scores": {
+                        "Evidence": {"percent": evidence},
+                        "Impact": {"percent": impact},
+                        "Novelty": {"percent": novelty},
+                    },
+                },
+            }
+        )
+
+    return {
+        "schema_version": "1.0",
+        "generated_at": NOW_UTC_ISO,
+        "contract": "rss_pipeline_precomputed",
+        "digest": {
+            "generated_at": DIGEST_UTC_ISO,
+            "run_id": "digest-fastapi-coverage-gap",
+        },
+        "summary": {"articles": len(articles), "scored_articles": len(articles)},
+        "analysis": {
+            "lens_summary": {
+                "lenses": [
+                    {"name": "Evidence", "max_total": 10.0},
+                    {"name": "Impact", "max_total": 10.0},
+                    {"name": "Novelty", "max_total": 10.0},
+                ]
+            },
+            "source_differentiation": {},
+        },
+        "articles": articles,
+    }
+
+
+def _multi_week_coverage_gap_temporal_payload() -> dict:
+    articles = []
+    article_specs = [
+        ("2026-03-31", "Source A", ["Policy"], ["Risk"], 82.0, 24.0, 28.0),
+        ("2026-04-02", "Source A", ["Policy"], ["Risk"], 80.0, 26.0, 30.0),
+        ("2026-04-01", "Source B", ["Markets"], ["Growth"], 44.0, 76.0, 38.0),
+        ("2026-04-03", "Source B", ["Markets"], ["Growth"], 42.0, 78.0, 40.0),
+        ("2026-04-07", "Source B", ["Markets"], ["Growth"], 46.0, 74.0, 42.0),
+        ("2026-04-09", "Source B", ["Markets"], ["Growth"], 48.0, 72.0, 44.0),
+        ("2026-04-14", "Source B", ["Markets"], ["Growth"], 50.0, 70.0, 46.0),
+        ("2026-04-16", "Source B", ["Markets"], ["Growth"], 52.0, 68.0, 48.0),
+        ("2026-04-21", "Source A", ["Policy"], ["Risk"], 76.0, 30.0, 34.0),
+        ("2026-04-23", "Source A", ["Policy"], ["Risk"], 74.0, 32.0, 36.0),
+        ("2026-04-22", "Source B", ["Markets"], ["Growth"], 54.0, 66.0, 50.0),
+        ("2026-04-24", "Source B", ["Markets"], ["Growth"], 56.0, 64.0, 52.0),
+    ]
+    for idx, (published, source_name, topic_tags, ai_tags, evidence, impact, novelty) in enumerate(article_specs):
+        articles.append(
+            {
+                "id": f"coverage-gap-range-endpoint-{idx}",
+                "title": f"Coverage gap range endpoint {idx}",
+                "link": f"https://example.com/coverage-gap-range/{idx}",
+                "published": f"{published}T00:00:00Z",
+                "summary": f"Summary {idx}",
+                "ai_summary": f"AI Summary {idx}",
+                "ai_tags": ai_tags,
+                "topic_tags": topic_tags,
+                "source": {"id": source_name.lower().replace(' ', '-'), "name": source_name},
+                "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                "scraped": {"title": f"Coverage gap range endpoint {idx}", "body_text": "Body"},
+                "scrape_error": None,
+                "score": {
+                    "value": 15.0,
+                    "max_value": 20.0,
+                    "percent": 75.0,
+                    "rubric_count": 3,
+                    "lens_scores": {
+                        "Evidence": {"percent": evidence},
+                        "Impact": {"percent": impact},
+                        "Novelty": {"percent": novelty},
+                    },
+                },
+            }
+        )
+
+    return {
+        "schema_version": "1.0",
+        "generated_at": NOW_UTC_ISO,
+        "contract": "rss_pipeline_precomputed",
+        "digest": {
+            "generated_at": DIGEST_UTC_ISO,
+            "run_id": "digest-fastapi-coverage-gap-range",
+        },
+        "summary": {"articles": len(articles), "scored_articles": len(articles)},
+        "analysis": {
+            "lens_summary": {
+                "lenses": [
+                    {"name": "Evidence", "max_total": 10.0},
+                    {"name": "Impact", "max_total": 10.0},
+                    {"name": "Novelty", "max_total": 10.0},
+                ]
+            },
+            "source_differentiation": {},
+        },
+        "articles": articles,
+    }
+
+
 class FastApiNewsEndpointTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -135,6 +269,7 @@ class FastApiNewsEndpointTests(unittest.TestCase):
         self.assertIn("tag_sliced_analysis", payload["data"]["derived"])
         self.assertIn("tag_momentum", payload["data"]["derived"])
         self.assertIn("group_latent_space", payload["data"]["derived"])
+        self.assertIn("group_temporal_latent_space", payload["data"]["derived"])
         self.assertIn("tag_lens_pca", payload["data"]["derived"])
         self.assertIn("event_control", payload["data"]["derived"])
 
@@ -147,6 +282,83 @@ class FastApiNewsEndpointTests(unittest.TestCase):
         missing_snapshot = self.client.get("/api/news/stats?snapshot_date=2026-03-09")
         self.assertEqual(missing_snapshot.status_code, 404)
         self.assertEqual(missing_snapshot.json()["status"], "not_found")
+
+    def test_stats_serializes_group_temporal_coverage_gap_metrics(self):
+        original_payload = self.current_payload_path.read_text(encoding="utf-8")
+        try:
+            self.current_payload_path.write_text(json.dumps(_coverage_gap_temporal_payload()), encoding="utf-8")
+            stats = self.client.get("/api/news/stats?refresh=1")
+            self.assertEqual(stats.status_code, 200)
+
+            payload = stats.json()
+            temporal = payload["data"]["derived"]["group_temporal_latent_space"]
+            self.assertEqual(temporal["summary"]["bucket_count"], 3)
+
+            if temporal["status"] == "unavailable":
+                self.assertIn("pca", str(temporal.get("reason", "")).lower())
+                return
+
+            by_source = {row["group"]: row for row in temporal["groups"]["source"]}
+            by_topic = {row["group"]: row for row in temporal["groups"]["topic"]}
+            by_tag = {row["group"]: row for row in temporal["groups"]["tag"]}
+
+            self.assertEqual(
+                [bucket["bucket_start"] for bucket in by_source["Source A"]["buckets"]],
+                ["2026-03-30", "2026-04-13"],
+            )
+            self.assertEqual(by_source["Source A"]["path_summary"]["coverage_gap_count"], 1)
+            self.assertEqual(
+                by_source["Source A"]["path_summary"]["coverage_gap_ranges"][0],
+                {
+                    "start_bucket": "2026-04-06",
+                    "end_bucket": "2026-04-06",
+                    "missing_bucket_count": 1,
+                    "label": "2026-04-06",
+                },
+            )
+            self.assertEqual(by_source["Source B"]["path_summary"]["coverage_gap_count"], 0)
+            self.assertEqual(by_topic["Policy"]["path_summary"]["coverage_gap_count"], 1)
+            self.assertEqual(by_topic["Markets"]["path_summary"]["coverage_gap_count"], 0)
+            self.assertEqual(by_tag["Risk"]["path_summary"]["coverage_gap_count"], 1)
+            self.assertEqual(by_tag["Growth"]["path_summary"]["coverage_gap_count"], 0)
+        finally:
+            self.current_payload_path.write_text(original_payload, encoding="utf-8")
+            self.client.get("/api/news/stats?refresh=1")
+
+    def test_stats_serializes_multi_week_coverage_gap_ranges(self):
+        original_payload = self.current_payload_path.read_text(encoding="utf-8")
+        try:
+            self.current_payload_path.write_text(json.dumps(_multi_week_coverage_gap_temporal_payload()), encoding="utf-8")
+            stats = self.client.get("/api/news/stats?refresh=1")
+            self.assertEqual(stats.status_code, 200)
+
+            payload = stats.json()
+            temporal = payload["data"]["derived"]["group_temporal_latent_space"]
+            self.assertEqual(temporal["summary"]["bucket_count"], 4)
+
+            if temporal["status"] == "unavailable":
+                self.assertIn("pca", str(temporal.get("reason", "")).lower())
+                return
+
+            by_source = {row["group"]: row for row in temporal["groups"]["source"]}
+            source_a = by_source["Source A"]
+            self.assertEqual(
+                [bucket["bucket_start"] for bucket in source_a["buckets"]],
+                ["2026-03-30", "2026-04-20"],
+            )
+            self.assertEqual(source_a["path_summary"]["coverage_gap_count"], 1)
+            self.assertEqual(
+                source_a["path_summary"]["coverage_gap_ranges"][0],
+                {
+                    "start_bucket": "2026-04-06",
+                    "end_bucket": "2026-04-13",
+                    "missing_bucket_count": 2,
+                    "label": "2026-04-06 to 2026-04-13",
+                },
+            )
+        finally:
+            self.current_payload_path.write_text(original_payload, encoding="utf-8")
+            self.client.get("/api/news/stats?refresh=1")
 
     def test_stats_precomputed_mode_serves_snapshot_and_missing_returns_503(self):
         snapshot_payload = {

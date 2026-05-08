@@ -729,6 +729,373 @@ class RssDigestServiceTests(unittest.TestCase):
         self.assertTrue(by_tag["Risk"]["top_lens_deviations"])
         self.assertIn("Evidence", {row["lens"] for row in by_tag["Risk"]["top_lens_deviations"]})
 
+    def test_group_temporal_latent_space_derives_weekly_group_paths(self):
+        articles = []
+        for idx in range(12):
+            source_name = "Source A" if idx % 2 == 0 else "Source B"
+            topic_tags = ["Policy"] if idx < 8 else ["Markets"]
+            ai_tags = ["Risk"] if idx < 8 else ["Growth"]
+            published_day = 3 + idx
+            evidence = 85.0 - idx * 4.0
+            impact = 18.0 + idx * 5.0
+            novelty = 25.0 + idx * 3.0
+            articles.append(
+                {
+                    "id": f"temporal-{idx}",
+                    "title": f"Temporal latent {idx}",
+                    "published": f"2026-03-{published_day:02d}T00:00:00Z",
+                    "ai_tags": ai_tags,
+                    "topic_tags": topic_tags,
+                    "source": {"name": source_name},
+                    "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                    "scraped": {"title": f"Temporal latent {idx}", "body_text": "Body"},
+                    "scrape_error": None,
+                    "score": {
+                        "lens_scores": {
+                            "Evidence": {"percent": evidence},
+                            "Impact": {"percent": impact},
+                            "Novelty": {"percent": novelty},
+                        }
+                    },
+                }
+            )
+
+        payload = {
+            "analysis": {
+                "lens_summary": {
+                    "lenses": [
+                        {"name": "Evidence", "max_total": 10.0},
+                        {"name": "Impact", "max_total": 10.0},
+                        {"name": "Novelty", "max_total": 10.0},
+                    ]
+                }
+            },
+            "articles": articles,
+        }
+        records = normalize_articles(payload)
+        stats = derive_stats(sort_records_desc(records), payload)
+        temporal = stats["group_temporal_latent_space"]
+
+        if temporal["status"] == "unavailable":
+            self.assertIn("pca", str(temporal.get("reason", "")).lower())
+            return
+
+        self.assertEqual(temporal["status"], "ok")
+        self.assertEqual(temporal["config"]["bucket_granularity"], "week")
+        self.assertGreaterEqual(temporal["summary"]["bucket_count"], 2)
+        self.assertGreaterEqual(temporal["summary"]["moving_group_counts"]["source"], 2)
+
+        by_source = {row["group"]: row for row in temporal["groups"]["source"]}
+        self.assertEqual(by_source["Source A"]["status"], "ok")
+        self.assertEqual(by_source["Source A"]["n_buckets"], 2)
+        self.assertEqual(by_source["Source A"]["buckets"][0]["bucket_start"], "2026-03-02")
+        self.assertEqual(by_source["Source A"]["buckets"][1]["bucket_start"], "2026-03-09")
+        self.assertGreater(by_source["Source A"]["path_summary"]["total_movement_pca"], 0.0)
+        self.assertIsNotNone(by_source["Source A"]["path_summary"]["direction_pca"])
+        self.assertIsNotNone(by_source["Source A"]["path_summary"]["direction_mds"])
+
+        by_topic = {row["group"]: row for row in temporal["groups"]["topic"]}
+        self.assertEqual(by_topic["Policy"]["status"], "ok")
+        self.assertGreaterEqual(by_topic["Policy"]["path_summary"]["valid_pca_bucket_count"], 2)
+
+        by_tag = {row["group"]: row for row in temporal["groups"]["tag"]}
+        self.assertEqual(by_tag["Risk"]["status"], "ok")
+        self.assertEqual(by_tag["Growth"]["status"], "sparse")
+
+    def test_group_temporal_latent_space_keeps_source_topic_and_tag_paths_isolated(self):
+        articles = []
+        article_specs = [
+            ("2026-04-01", "Source A", ["Policy"], ["Risk"], 82.0, 28.0, 34.0),
+            ("2026-04-02", "Source A", ["Markets"], ["Growth"], 48.0, 77.0, 44.0),
+            ("2026-04-03", "Source B", ["Policy"], ["Risk"], 80.0, 30.0, 36.0),
+            ("2026-04-04", "Source B", ["Markets"], ["Growth"], 46.0, 79.0, 42.0),
+            ("2026-04-05", "Source A", ["Science"], ["Breakthrough"], 38.0, 35.0, 88.0),
+            ("2026-04-08", "Source A", ["Policy"], ["Risk"], 84.0, 26.0, 32.0),
+            ("2026-04-09", "Source A", ["Markets"], ["Growth"], 50.0, 75.0, 46.0),
+            ("2026-04-10", "Source B", ["Policy"], ["Risk"], 78.0, 32.0, 34.0),
+            ("2026-04-11", "Source B", ["Markets"], ["Growth"], 44.0, 81.0, 40.0),
+            ("2026-04-12", "Source A", ["Science"], ["Breakthrough"], 40.0, 33.0, 90.0),
+        ]
+        for idx, (published, source_name, topic_tags, ai_tags, evidence, impact, novelty) in enumerate(article_specs):
+            articles.append(
+                {
+                    "id": f"isolated-temporal-{idx}",
+                    "title": f"Isolated temporal {idx}",
+                    "published": f"{published}T00:00:00Z",
+                    "ai_tags": ai_tags,
+                    "topic_tags": topic_tags,
+                    "source": {"name": source_name},
+                    "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                    "scraped": {"title": f"Isolated temporal {idx}", "body_text": "Body"},
+                    "scrape_error": None,
+                    "score": {
+                        "lens_scores": {
+                            "Evidence": {"percent": evidence},
+                            "Impact": {"percent": impact},
+                            "Novelty": {"percent": novelty},
+                        }
+                    },
+                }
+            )
+
+        payload = {
+            "analysis": {
+                "lens_summary": {
+                    "lenses": [
+                        {"name": "Evidence", "max_total": 10.0},
+                        {"name": "Impact", "max_total": 10.0},
+                        {"name": "Novelty", "max_total": 10.0},
+                    ]
+                }
+            },
+            "articles": articles,
+        }
+        records = normalize_articles(payload)
+        stats = derive_stats(sort_records_desc(records), payload)
+        temporal = stats["group_temporal_latent_space"]
+
+        if temporal["status"] == "unavailable":
+            self.assertIn("pca", str(temporal.get("reason", "")).lower())
+            return
+
+        by_source = {row["group"]: row for row in temporal["groups"]["source"]}
+        by_topic = {row["group"]: row for row in temporal["groups"]["topic"]}
+        by_tag = {row["group"]: row for row in temporal["groups"]["tag"]}
+
+        self.assertEqual(by_source["Source A"]["status"], "ok")
+        self.assertEqual(by_source["Source A"]["n_articles"], 6)
+        self.assertEqual(by_source["Source A"]["n_buckets"], 2)
+        self.assertEqual(
+            [bucket["n_articles"] for bucket in by_source["Source A"]["buckets"]],
+            [3, 3],
+        )
+        self.assertEqual(
+            [bucket["source_counts"] for bucket in by_source["Source A"]["buckets"]],
+            [{"Source A": 3}, {"Source A": 3}],
+        )
+
+        self.assertEqual(by_topic["Policy"]["status"], "ok")
+        self.assertEqual(by_topic["Policy"]["n_articles"], 4)
+        self.assertEqual(by_topic["Policy"]["n_buckets"], 2)
+        self.assertEqual(
+            [bucket["n_articles"] for bucket in by_topic["Policy"]["buckets"]],
+            [2, 2],
+        )
+        self.assertEqual(
+            [bucket["source_counts"] for bucket in by_topic["Policy"]["buckets"]],
+            [{"Source A": 1, "Source B": 1}, {"Source A": 1, "Source B": 1}],
+        )
+
+        self.assertEqual(by_tag["Risk"]["status"], "ok")
+        self.assertEqual(by_tag["Risk"]["n_articles"], 4)
+        self.assertEqual(by_tag["Risk"]["n_buckets"], 2)
+        self.assertEqual(
+            [bucket["n_articles"] for bucket in by_tag["Risk"]["buckets"]],
+            [2, 2],
+        )
+        self.assertEqual(
+            [bucket["source_counts"] for bucket in by_tag["Risk"]["buckets"]],
+            [{"Source A": 1, "Source B": 1}, {"Source A": 1, "Source B": 1}],
+        )
+
+        self.assertEqual(by_topic["Science"]["status"], "sparse")
+        self.assertEqual(by_topic["Science"]["n_articles"], 2)
+        self.assertEqual(
+            [bucket["n_articles"] for bucket in by_topic["Science"]["buckets"]],
+            [1, 1],
+        )
+        self.assertEqual(by_tag["Breakthrough"]["status"], "sparse")
+        self.assertEqual(by_tag["Breakthrough"]["n_articles"], 2)
+        self.assertEqual(
+            [bucket["n_articles"] for bucket in by_tag["Breakthrough"]["buckets"]],
+            [1, 1],
+        )
+
+        self.assertEqual(by_source["Source A"]["path_summary"]["valid_pca_bucket_count"], 2)
+        self.assertEqual(by_topic["Policy"]["path_summary"]["valid_pca_bucket_count"], 2)
+        self.assertEqual(by_tag["Risk"]["path_summary"]["valid_pca_bucket_count"], 2)
+        self.assertEqual(by_topic["Science"]["path_summary"]["valid_pca_bucket_count"], 0)
+        self.assertEqual(by_tag["Breakthrough"]["path_summary"]["valid_pca_bucket_count"], 0)
+
+    def test_group_temporal_latent_space_counts_middle_week_coverage_gaps_per_group(self):
+        articles = []
+        article_specs = [
+            ("2026-04-01", "Source A", ["Policy"], ["Risk"], 82.0, 24.0, 28.0),
+            ("2026-04-03", "Source A", ["Policy"], ["Risk"], 80.0, 26.0, 30.0),
+            ("2026-04-02", "Source B", ["Markets"], ["Growth"], 44.0, 76.0, 38.0),
+            ("2026-04-04", "Source B", ["Markets"], ["Growth"], 42.0, 78.0, 40.0),
+            ("2026-04-07", "Source B", ["Markets"], ["Growth"], 46.0, 74.0, 42.0),
+            ("2026-04-09", "Source B", ["Markets"], ["Growth"], 48.0, 72.0, 44.0),
+            ("2026-04-14", "Source A", ["Policy"], ["Risk"], 76.0, 30.0, 34.0),
+            ("2026-04-16", "Source A", ["Policy"], ["Risk"], 74.0, 32.0, 36.0),
+            ("2026-04-15", "Source B", ["Markets"], ["Growth"], 50.0, 70.0, 46.0),
+            ("2026-04-17", "Source B", ["Markets"], ["Growth"], 52.0, 68.0, 48.0),
+        ]
+        for idx, (published, source_name, topic_tags, ai_tags, evidence, impact, novelty) in enumerate(article_specs):
+            articles.append(
+                {
+                    "id": f"coverage-gap-{idx}",
+                    "title": f"Coverage gap {idx}",
+                    "published": f"{published}T00:00:00Z",
+                    "ai_tags": ai_tags,
+                    "topic_tags": topic_tags,
+                    "source": {"name": source_name},
+                    "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                    "scraped": {"title": f"Coverage gap {idx}", "body_text": "Body"},
+                    "scrape_error": None,
+                    "score": {
+                        "lens_scores": {
+                            "Evidence": {"percent": evidence},
+                            "Impact": {"percent": impact},
+                            "Novelty": {"percent": novelty},
+                        }
+                    },
+                }
+            )
+
+        payload = {
+            "analysis": {
+                "lens_summary": {
+                    "lenses": [
+                        {"name": "Evidence", "max_total": 10.0},
+                        {"name": "Impact", "max_total": 10.0},
+                        {"name": "Novelty", "max_total": 10.0},
+                    ]
+                }
+            },
+            "articles": articles,
+        }
+        records = normalize_articles(payload)
+        stats = derive_stats(sort_records_desc(records), payload)
+        temporal = stats["group_temporal_latent_space"]
+
+        if temporal["status"] == "unavailable":
+            self.assertIn("pca", str(temporal.get("reason", "")).lower())
+            return
+
+        self.assertEqual(temporal["summary"]["bucket_count"], 3)
+
+        by_source = {row["group"]: row for row in temporal["groups"]["source"]}
+        by_topic = {row["group"]: row for row in temporal["groups"]["topic"]}
+        by_tag = {row["group"]: row for row in temporal["groups"]["tag"]}
+
+        self.assertEqual(by_source["Source A"]["status"], "ok")
+        self.assertEqual(
+            [bucket["bucket_start"] for bucket in by_source["Source A"]["buckets"]],
+            ["2026-03-30", "2026-04-13"],
+        )
+        self.assertEqual(by_source["Source A"]["path_summary"]["coverage_gap_count"], 1)
+        self.assertEqual(
+            by_source["Source A"]["path_summary"]["coverage_gap_ranges"],
+            [
+                {
+                    "start_bucket": "2026-04-06",
+                    "end_bucket": "2026-04-06",
+                    "missing_bucket_count": 1,
+                    "label": "2026-04-06",
+                }
+            ],
+        )
+        self.assertEqual(by_source["Source A"]["path_summary"]["valid_pca_bucket_count"], 2)
+
+        self.assertEqual(by_source["Source B"]["status"], "ok")
+        self.assertEqual(
+            [bucket["bucket_start"] for bucket in by_source["Source B"]["buckets"]],
+            ["2026-03-30", "2026-04-06", "2026-04-13"],
+        )
+        self.assertEqual(by_source["Source B"]["path_summary"]["coverage_gap_count"], 0)
+        self.assertEqual(by_source["Source B"]["path_summary"]["valid_pca_bucket_count"], 3)
+
+        self.assertEqual(by_topic["Policy"]["path_summary"]["coverage_gap_count"], 1)
+        self.assertEqual(by_topic["Policy"]["path_summary"]["valid_pca_bucket_count"], 2)
+        self.assertEqual(by_topic["Markets"]["path_summary"]["coverage_gap_count"], 0)
+        self.assertEqual(by_topic["Markets"]["path_summary"]["valid_pca_bucket_count"], 3)
+
+        self.assertEqual(by_tag["Risk"]["path_summary"]["coverage_gap_count"], 1)
+        self.assertEqual(by_tag["Risk"]["path_summary"]["valid_pca_bucket_count"], 2)
+        self.assertEqual(by_tag["Growth"]["path_summary"]["coverage_gap_count"], 0)
+        self.assertEqual(by_tag["Growth"]["path_summary"]["valid_pca_bucket_count"], 3)
+
+    def test_group_temporal_latent_space_formats_multi_week_coverage_gap_ranges(self):
+        articles = []
+        article_specs = [
+            ("2026-03-31", "Source A", ["Policy"], ["Risk"], 82.0, 24.0, 28.0),
+            ("2026-04-02", "Source A", ["Policy"], ["Risk"], 80.0, 26.0, 30.0),
+            ("2026-04-01", "Source B", ["Markets"], ["Growth"], 44.0, 76.0, 38.0),
+            ("2026-04-03", "Source B", ["Markets"], ["Growth"], 42.0, 78.0, 40.0),
+            ("2026-04-07", "Source B", ["Markets"], ["Growth"], 46.0, 74.0, 42.0),
+            ("2026-04-09", "Source B", ["Markets"], ["Growth"], 48.0, 72.0, 44.0),
+            ("2026-04-14", "Source B", ["Markets"], ["Growth"], 50.0, 70.0, 46.0),
+            ("2026-04-16", "Source B", ["Markets"], ["Growth"], 52.0, 68.0, 48.0),
+            ("2026-04-21", "Source A", ["Policy"], ["Risk"], 76.0, 30.0, 34.0),
+            ("2026-04-23", "Source A", ["Policy"], ["Risk"], 74.0, 32.0, 36.0),
+            ("2026-04-22", "Source B", ["Markets"], ["Growth"], 54.0, 66.0, 50.0),
+            ("2026-04-24", "Source B", ["Markets"], ["Growth"], 56.0, 64.0, 52.0),
+        ]
+        for idx, (published, source_name, topic_tags, ai_tags, evidence, impact, novelty) in enumerate(article_specs):
+            articles.append(
+                {
+                    "id": f"coverage-gap-range-{idx}",
+                    "title": f"Coverage gap range {idx}",
+                    "published": f"{published}T00:00:00Z",
+                    "ai_tags": ai_tags,
+                    "topic_tags": topic_tags,
+                    "source": {"name": source_name},
+                    "feed": {"name": "Feed", "url": "https://example.com/feed"},
+                    "scraped": {"title": f"Coverage gap range {idx}", "body_text": "Body"},
+                    "scrape_error": None,
+                    "score": {
+                        "lens_scores": {
+                            "Evidence": {"percent": evidence},
+                            "Impact": {"percent": impact},
+                            "Novelty": {"percent": novelty},
+                        }
+                    },
+                }
+            )
+
+        payload = {
+            "analysis": {
+                "lens_summary": {
+                    "lenses": [
+                        {"name": "Evidence", "max_total": 10.0},
+                        {"name": "Impact", "max_total": 10.0},
+                        {"name": "Novelty", "max_total": 10.0},
+                    ]
+                }
+            },
+            "articles": articles,
+        }
+        records = normalize_articles(payload)
+        stats = derive_stats(sort_records_desc(records), payload)
+        temporal = stats["group_temporal_latent_space"]
+
+        if temporal["status"] == "unavailable":
+            self.assertIn("pca", str(temporal.get("reason", "")).lower())
+            return
+
+        self.assertEqual(temporal["summary"]["bucket_count"], 4)
+
+        by_source = {row["group"]: row for row in temporal["groups"]["source"]}
+        source_a = by_source["Source A"]
+        self.assertEqual(
+            [bucket["bucket_start"] for bucket in source_a["buckets"]],
+            ["2026-03-30", "2026-04-20"],
+        )
+        self.assertEqual(source_a["path_summary"]["coverage_gap_count"], 1)
+        self.assertEqual(
+            source_a["path_summary"]["coverage_gap_ranges"],
+            [
+                {
+                    "start_bucket": "2026-04-06",
+                    "end_bucket": "2026-04-13",
+                    "missing_bucket_count": 2,
+                    "label": "2026-04-06 to 2026-04-13",
+                }
+            ],
+        )
+        self.assertEqual(source_a["path_summary"]["valid_pca_bucket_count"], 2)
+
     def test_tag_lens_pca_derives_tag_profile_points(self):
         articles = []
         tag_specs = [

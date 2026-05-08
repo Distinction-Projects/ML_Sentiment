@@ -8,7 +8,7 @@ import statistics
 import threading
 import time
 from collections import Counter, OrderedDict, defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -521,6 +521,16 @@ _PCA_MAX_COMPONENTS = _coerce_int(os.getenv("RSS_PCA_MAX_COMPONENTS"), default=6
 _MDS_MAX_DIMENSIONS = _coerce_int(os.getenv("RSS_MDS_MAX_DIMENSIONS"), default=3, minimum=1)
 _GROUP_LATENT_MIN_ARTICLES = _coerce_int(os.getenv("NEWS_GROUP_LATENT_MIN_ARTICLES"), default=5, minimum=1)
 _GROUP_LATENT_MAX_GROUPS = _coerce_int(os.getenv("NEWS_GROUP_LATENT_MAX_GROUPS"), default=50, minimum=1)
+_GROUP_TEMPORAL_MIN_ARTICLES_PER_BUCKET = _coerce_int(
+    os.getenv("NEWS_GROUP_TEMPORAL_MIN_ARTICLES_PER_BUCKET"),
+    default=2,
+    minimum=1,
+)
+_GROUP_TEMPORAL_MIN_BUCKETS_PER_GROUP = _coerce_int(
+    os.getenv("NEWS_GROUP_TEMPORAL_MIN_BUCKETS_PER_GROUP"),
+    default=2,
+    minimum=1,
+)
 _TAG_LENS_PCA_MIN_ARTICLES = _coerce_int(os.getenv("NEWS_TAG_LENS_PCA_MIN_ARTICLES"), default=5, minimum=1)
 _TAG_LENS_PCA_MAX_TAGS = _coerce_int(os.getenv("NEWS_TAG_LENS_PCA_MAX_TAGS"), default=75, minimum=2)
 _TAG_MOMENTUM_HALF_LIFE_DAYS = _coerce_int(os.getenv("NEWS_TAG_MOMENTUM_HALF_LIFE_DAYS"), default=3, minimum=1)
@@ -3935,6 +3945,390 @@ def _group_latent_space_from_records(
     return base_payload
 
 
+def _bucket_bounds_for_date(day_value: date, granularity: str) -> tuple[date, date]:
+    normalized = str(granularity or "week").strip().lower()
+    if normalized == "day":
+        return day_value, day_value
+    if normalized == "month":
+        start = day_value.replace(day=1)
+        if start.month == 12:
+            next_month = date(start.year + 1, 1, 1)
+        else:
+            next_month = date(start.year, start.month + 1, 1)
+        return start, next_month - timedelta(days=1)
+    start = day_value - timedelta(days=day_value.weekday())
+    return start, start + timedelta(days=6)
+
+
+def _next_bucket_start(day_value: date, granularity: str) -> date:
+    normalized = str(granularity or "week").strip().lower()
+    if normalized == "day":
+        return day_value + timedelta(days=1)
+    if normalized == "month":
+        if day_value.month == 12:
+            return date(day_value.year + 1, 1, 1)
+        return date(day_value.year, day_value.month + 1, 1)
+    return day_value + timedelta(days=7)
+
+
+def _coverage_gap_ranges(bucket_dates: list[date], granularity: str) -> list[dict[str, Any]]:
+    ranges: list[dict[str, Any]] = []
+    for previous, current in zip(bucket_dates, bucket_dates[1:]):
+        next_bucket = _next_bucket_start(previous, granularity)
+        if next_bucket == current:
+            continue
+
+        missing_start = next_bucket
+        missing_end = next_bucket
+        missing_bucket_count = 0
+        while next_bucket < current:
+            missing_end = next_bucket
+            missing_bucket_count += 1
+            next_bucket = _next_bucket_start(next_bucket, granularity)
+
+        label = missing_start.isoformat()
+        if missing_end != missing_start:
+            label = f"{label} to {missing_end.isoformat()}"
+
+        ranges.append(
+            {
+                "start_bucket": missing_start.isoformat(),
+                "end_bucket": missing_end.isoformat(),
+                "missing_bucket_count": missing_bucket_count,
+                "label": label,
+            }
+        )
+    return ranges
+
+
+def _group_temporal_latent_space_from_records(
+    article_lens_percentages: list[dict[str, float]],
+    source_labels: list[str],
+    topic_keys_for_lens_rows: list[list[str]],
+    topic_display_labels: dict[str, str],
+    tag_keys_for_lens_rows: list[list[str]],
+    tag_display_labels: dict[str, str],
+    article_meta_rows: list[dict[str, Any]],
+    lens_pca: dict[str, Any],
+    lens_mds: dict[str, Any],
+    *,
+    bucket_granularity: str = "week",
+    min_articles_per_bucket: int = _GROUP_TEMPORAL_MIN_ARTICLES_PER_BUCKET,
+    min_buckets_per_group: int = _GROUP_TEMPORAL_MIN_BUCKETS_PER_GROUP,
+    max_groups_per_type: int = _GROUP_LATENT_MAX_GROUPS,
+) -> dict[str, Any]:
+    base_payload: dict[str, Any] = {
+        "status": "unavailable",
+        "reason": "",
+        "basis": "global_lens_pca_mds_by_time_bucket",
+        "config": {
+            "bucket_granularity": bucket_granularity,
+            "min_articles_per_bucket": min_articles_per_bucket,
+            "min_buckets_per_group": min_buckets_per_group,
+            "max_groups_per_type": max_groups_per_type,
+            "group_types": ["source", "topic", "tag"],
+            "topic_basis": "topic_tags",
+            "tag_basis": "ai_tags",
+        },
+        "groups": {"source": [], "topic": [], "tag": []},
+        "summary": {
+            "bucket_count": 0,
+            "dated_article_count": 0,
+            "group_counts": {"source": 0, "topic": 0, "tag": 0},
+            "moving_group_counts": {"source": 0, "topic": 0, "tag": 0},
+            "sparse_group_counts": {"source": 0, "topic": 0, "tag": 0},
+            "total_groups": 0,
+            "total_moving_groups": 0,
+            "total_sparse_groups": 0,
+        },
+    }
+    if (
+        not article_lens_percentages
+        or len(article_lens_percentages) != len(source_labels)
+        or len(article_lens_percentages) != len(topic_keys_for_lens_rows)
+        or len(article_lens_percentages) != len(tag_keys_for_lens_rows)
+        or len(article_lens_percentages) != len(article_meta_rows)
+    ):
+        base_payload["reason"] = "Need aligned article lens, source, topic, tag, and metadata rows."
+        return base_payload
+
+    if not isinstance(lens_pca, dict) or str(lens_pca.get("status") or "") != "ok":
+        base_payload["reason"] = "Global PCA is unavailable; temporal group latent space cannot be computed."
+        return base_payload
+
+    pca_points = lens_pca.get("article_points") if isinstance(lens_pca.get("article_points"), list) else []
+    if not pca_points:
+        base_payload["reason"] = "Global PCA has no article points."
+        return base_payload
+
+    mds_points = lens_mds.get("article_points") if isinstance(lens_mds, dict) and isinstance(lens_mds.get("article_points"), list) else []
+    pca_by_index: dict[int, dict[str, Any]] = {}
+    for offset, point in enumerate(pca_points):
+        if not isinstance(point, dict):
+            continue
+        row_index_raw = point.get("row_index")
+        try:
+            row_index = int(row_index_raw)
+        except (TypeError, ValueError):
+            row_index = offset
+        pca_by_index[row_index] = point
+
+    mds_by_index: dict[int, dict[str, Any]] = {}
+    for offset, point in enumerate(mds_points):
+        if not isinstance(point, dict):
+            continue
+        row_index_raw = point.get("row_index")
+        try:
+            row_index = int(row_index_raw)
+        except (TypeError, ValueError):
+            row_index = offset
+        mds_by_index[row_index] = point
+
+    discovered_lenses = {
+        lens_name
+        for row in article_lens_percentages
+        for lens_name, value in row.items()
+        if isinstance(lens_name, str) and isinstance(value, (int, float)) and math.isfinite(float(value))
+    }
+    corpus_lens_means: dict[str, float] = {}
+    for lens_name in sorted(discovered_lenses):
+        values = [
+            float(row[lens_name])
+            for row in article_lens_percentages
+            if isinstance(row.get(lens_name), (int, float)) and math.isfinite(float(row[lens_name]))
+        ]
+        if values:
+            corpus_lens_means[lens_name] = sum(values) / len(values)
+
+    source_display_labels: dict[str, str] = {}
+    buckets: dict[str, dict[str, list[int]]] = {
+        "source": defaultdict(list),
+        "topic": defaultdict(list),
+        "tag": defaultdict(list),
+    }
+    bucket_article_counts: Counter[str] = Counter()
+    bucket_starts: dict[str, date] = {}
+
+    for row_index, meta_row in enumerate(article_meta_rows):
+        published_dt = parse_datetime(meta_row.get("published_at") if isinstance(meta_row, dict) else None)
+        if published_dt is None:
+            continue
+        bucket_start, _bucket_end = _bucket_bounds_for_date(published_dt.date(), bucket_granularity)
+        bucket_key = bucket_start.isoformat()
+        bucket_article_counts[bucket_key] += 1
+        bucket_starts[bucket_key] = bucket_start
+
+        source_text = str(source_labels[row_index] or "Unknown").strip() or "Unknown"
+        source_key = source_text.lower()
+        source_display_labels.setdefault(source_key, source_text)
+        buckets["source"][f"{source_key}::{bucket_key}"].append(row_index)
+
+        topic_keys = topic_keys_for_lens_rows[row_index] if row_index < len(topic_keys_for_lens_rows) else []
+        for topic_key in list(dict.fromkeys(topic_keys or ["__untagged__"])):
+            normalized_key = str(topic_key or "__untagged__").strip().lower() or "__untagged__"
+            buckets["topic"][f"{normalized_key}::{bucket_key}"].append(row_index)
+
+        tag_keys = tag_keys_for_lens_rows[row_index] if row_index < len(tag_keys_for_lens_rows) else []
+        for tag_key in list(dict.fromkeys(tag_keys or ["__untagged__"])):
+            normalized_key = str(tag_key or "__untagged__").strip().lower() or "__untagged__"
+            buckets["tag"][f"{normalized_key}::{bucket_key}"].append(row_index)
+
+    if not bucket_article_counts:
+        base_payload["reason"] = "No dated articles available for temporal group latent space."
+        return base_payload
+
+    display_maps = {
+        "source": source_display_labels,
+        "topic": {**topic_display_labels, "__untagged__": "Untagged"},
+        "tag": {**tag_display_labels, "__untagged__": "Untagged"},
+    }
+
+    def build_bucket_row(group_type: str, group_key: str, bucket_key: str, indexes: list[int]) -> dict[str, Any]:
+        unique_indexes = sorted(set(indexes))
+        pca_group_points = [pca_by_index[index] for index in unique_indexes if index in pca_by_index]
+        mds_group_points = [mds_by_index[index] for index in unique_indexes if index in mds_by_index]
+        source_counts = Counter(source_labels[index] for index in unique_indexes if index < len(source_labels))
+        bucket_start = bucket_starts.get(bucket_key)
+        if bucket_start is None:
+            bucket_start = date.fromisoformat(bucket_key)
+        bucket_start, bucket_end = _bucket_bounds_for_date(bucket_start, bucket_granularity)
+        pca_centroid = {
+            "pc1": _mean_or_none([float(point["pc1"]) for point in pca_group_points if isinstance(point.get("pc1"), (int, float))]),
+            "pc2": _mean_or_none([float(point["pc2"]) for point in pca_group_points if isinstance(point.get("pc2"), (int, float))]),
+            "pc3": _mean_or_none([float(point["pc3"]) for point in pca_group_points if isinstance(point.get("pc3"), (int, float))]),
+        }
+        mds_centroid = {
+            "mds1": _mean_or_none([float(point["mds1"]) for point in mds_group_points if isinstance(point.get("mds1"), (int, float))]),
+            "mds2": _mean_or_none([float(point["mds2"]) for point in mds_group_points if isinstance(point.get("mds2"), (int, float))]),
+            "mds3": _mean_or_none([float(point["mds3"]) for point in mds_group_points if isinstance(point.get("mds3"), (int, float))]),
+        }
+        lens_deviation_rows: list[dict[str, Any]] = []
+        for lens_name, corpus_mean in corpus_lens_means.items():
+            values = [
+                float(article_lens_percentages[index][lens_name])
+                for index in unique_indexes
+                if index < len(article_lens_percentages)
+                and isinstance(article_lens_percentages[index].get(lens_name), (int, float))
+                and math.isfinite(float(article_lens_percentages[index][lens_name]))
+            ]
+            if not values:
+                continue
+            group_mean = sum(values) / len(values)
+            delta = group_mean - corpus_mean
+            lens_deviation_rows.append(
+                {
+                    "lens": lens_name,
+                    "mean_percent": group_mean,
+                    "corpus_mean_percent": corpus_mean,
+                    "delta": delta,
+                    "abs_delta": abs(delta),
+                }
+            )
+        lens_deviation_rows.sort(key=lambda row: (-float(row.get("abs_delta") or 0.0), str(row.get("lens") or "").lower()))
+        is_sparse = len(unique_indexes) < min_articles_per_bucket or not pca_group_points
+        return {
+            "bucket_start": bucket_start.isoformat(),
+            "bucket_end": bucket_end.isoformat(),
+            "bucket_label": bucket_start.isoformat(),
+            "group_type": group_type,
+            "group": display_maps[group_type].get(group_key, group_key),
+            "group_key": group_key,
+            "status": "sparse" if is_sparse else "ok",
+            "n_articles": len(unique_indexes),
+            "n_sources": len(source_counts),
+            "corpus_share": (
+                len(unique_indexes) / float(bucket_article_counts[bucket_key])
+                if bucket_article_counts.get(bucket_key)
+                else None
+            ),
+            **pca_centroid,
+            **mds_centroid,
+            "dispersion_pca": _centroid_dispersion(pca_group_points, pca_centroid, ("pc1", "pc2", "pc3")),
+            "dispersion_mds": _centroid_dispersion(mds_group_points, mds_centroid, ("mds1", "mds2", "mds3")),
+            "source_counts": dict(source_counts.most_common()),
+            "top_lens_deviations": lens_deviation_rows[:3],
+        }
+
+    temporal_groups: dict[str, list[dict[str, Any]]] = {"source": [], "topic": [], "tag": []}
+    for group_type, bucket_map in buckets.items():
+        grouped_indexes: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+        for composite_key, indexes in bucket_map.items():
+            group_key, bucket_key = composite_key.split("::", 1)
+            grouped_indexes[group_key][bucket_key].extend(indexes)
+
+        for group_key, bucket_indexes in grouped_indexes.items():
+            bucket_rows = [build_bucket_row(group_type, group_key, bucket_key, indexes) for bucket_key, indexes in bucket_indexes.items()]
+            bucket_rows.sort(key=lambda row: str(row.get("bucket_start") or ""))
+            pca_keys = ("pc1", "pc2", "pc3") if any(isinstance(row.get("pc3"), (int, float)) for row in bucket_rows) else (
+                ("pc1", "pc2") if any(isinstance(row.get("pc2"), (int, float)) for row in bucket_rows) else ("pc1",)
+            )
+            mds_keys = ("mds1", "mds2", "mds3") if any(isinstance(row.get("mds3"), (int, float)) for row in bucket_rows) else (
+                ("mds1", "mds2") if any(isinstance(row.get("mds2"), (int, float)) for row in bucket_rows) else ("mds1",)
+            )
+            total_articles = sum(int(row.get("n_articles") or 0) for row in bucket_rows)
+            valid_pca_rows = [
+                row
+                for row in bucket_rows
+                if str(row.get("status") or "") == "ok"
+                and all(isinstance(row.get(key), (int, float)) for key in pca_keys)
+            ]
+            valid_mds_rows = [
+                row
+                for row in bucket_rows
+                if str(row.get("status") or "") == "ok"
+                and all(isinstance(row.get(key), (int, float)) for key in mds_keys)
+            ]
+            pca_movements: list[float] = []
+            for previous, current in zip(valid_pca_rows, valid_pca_rows[1:]):
+                distance = _euclidean_distance(previous, current, pca_keys)
+                if isinstance(distance, (int, float)):
+                    pca_movements.append(float(distance))
+            mds_movements: list[float] = []
+            for previous, current in zip(valid_mds_rows, valid_mds_rows[1:]):
+                distance = _euclidean_distance(previous, current, mds_keys)
+                if isinstance(distance, (int, float)):
+                    mds_movements.append(float(distance))
+
+            bucket_dates = [date.fromisoformat(str(row.get("bucket_start"))) for row in bucket_rows if row.get("bucket_start")]
+            coverage_gap_ranges = _coverage_gap_ranges(bucket_dates, bucket_granularity)
+            coverage_gap_count = len(coverage_gap_ranges)
+
+            path_summary = {
+                "bucket_count": len(bucket_rows),
+                "valid_pca_bucket_count": len(valid_pca_rows),
+                "valid_mds_bucket_count": len(valid_mds_rows),
+                "sparse_bucket_count": sum(1 for row in bucket_rows if str(row.get("status") or "") != "ok"),
+                "coverage_gap_count": coverage_gap_count,
+                "coverage_gap_ranges": coverage_gap_ranges,
+                "total_movement_pca": sum(pca_movements) if pca_movements else 0.0,
+                "largest_jump_pca": max(pca_movements) if pca_movements else 0.0,
+                "total_movement_mds": sum(mds_movements) if mds_movements else 0.0,
+                "largest_jump_mds": max(mds_movements) if mds_movements else 0.0,
+                "start_bucket": valid_pca_rows[0]["bucket_start"] if valid_pca_rows else (bucket_rows[0]["bucket_start"] if bucket_rows else None),
+                "end_bucket": valid_pca_rows[-1]["bucket_start"] if valid_pca_rows else (bucket_rows[-1]["bucket_start"] if bucket_rows else None),
+                "direction_pca": (
+                    {f"{key}_delta": float(valid_pca_rows[-1][key]) - float(valid_pca_rows[0][key]) for key in pca_keys}
+                    if len(valid_pca_rows) >= 2
+                    else None
+                ),
+                "direction_mds": (
+                    {f"{key}_delta": float(valid_mds_rows[-1][key]) - float(valid_mds_rows[0][key]) for key in mds_keys}
+                    if len(valid_mds_rows) >= 2
+                    else None
+                ),
+            }
+            status = "ok" if len(valid_pca_rows) >= min_buckets_per_group else "sparse"
+            temporal_groups[group_type].append(
+                {
+                    "group_type": group_type,
+                    "group": display_maps[group_type].get(group_key, group_key),
+                    "group_key": group_key,
+                    "status": status,
+                    "reason": (
+                        ""
+                        if status == "ok"
+                        else f"Need at least {min_buckets_per_group} non-sparse buckets with PCA coordinates."
+                    ),
+                    "n_articles": total_articles,
+                    "n_buckets": len(bucket_rows),
+                    "date_start": bucket_rows[0]["bucket_start"] if bucket_rows else None,
+                    "date_end": bucket_rows[-1]["bucket_end"] if bucket_rows else None,
+                    "buckets": bucket_rows,
+                    "path_summary": path_summary,
+                }
+            )
+
+        temporal_groups[group_type].sort(
+            key=lambda row: (-int(row.get("n_articles") or 0), -int(row.get("n_buckets") or 0), str(row.get("group") or "").lower())
+        )
+
+    group_counts = {group_type: len(rows) for group_type, rows in temporal_groups.items()}
+    moving_counts = {
+        group_type: sum(1 for row in rows if str(row.get("status") or "") == "ok")
+        for group_type, rows in temporal_groups.items()
+    }
+    sparse_counts = {
+        group_type: sum(1 for row in rows if str(row.get("status") or "") != "ok")
+        for group_type, rows in temporal_groups.items()
+    }
+    base_payload["status"] = "ok"
+    base_payload["groups"] = {
+        group_type: rows[:max_groups_per_type]
+        for group_type, rows in temporal_groups.items()
+    }
+    base_payload["summary"] = {
+        "bucket_count": len(bucket_article_counts),
+        "dated_article_count": sum(bucket_article_counts.values()),
+        "group_counts": group_counts,
+        "moving_group_counts": moving_counts,
+        "sparse_group_counts": sparse_counts,
+        "total_groups": sum(group_counts.values()),
+        "total_moving_groups": sum(moving_counts.values()),
+        "total_sparse_groups": sum(sparse_counts.values()),
+    }
+    return base_payload
+
+
 def _tag_lens_pca_from_records(
     article_lens_percentages: list[dict[str, float]],
     source_labels: list[str],
@@ -5721,6 +6115,17 @@ def derive_stats(records: list[dict[str, Any]], payload: Any) -> dict[str, Any]:
         lens_mds,
         preferred_lenses=list(lens_maxima.keys()),
     )
+    group_temporal_latent_space = _group_temporal_latent_space_from_records(
+        article_lens_percentages,
+        source_labels_for_lens_rows,
+        topic_keys_for_lens_rows,
+        topic_display_labels,
+        tag_keys_for_lens_rows,
+        tag_display_labels,
+        article_meta_for_lens_rows,
+        lens_pca,
+        lens_mds,
+    )
     tag_lens_pca = _tag_lens_pca_from_records(
         article_lens_percentages,
         source_labels_for_lens_rows,
@@ -5797,6 +6202,7 @@ def derive_stats(records: list[dict[str, Any]], payload: Any) -> dict[str, Any]:
         "source_topic_control": source_topic_control,
         "tag_sliced_analysis": tag_sliced_analysis,
         "group_latent_space": group_latent_space,
+        "group_temporal_latent_space": group_temporal_latent_space,
         "tag_lens_pca": tag_lens_pca,
         "event_control": event_control,
         "source_reliability": source_reliability,

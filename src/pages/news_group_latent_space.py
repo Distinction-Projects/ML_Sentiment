@@ -20,6 +20,10 @@ GROUP_TYPE_OPTIONS = [
     {"label": "Topics", "value": "topic"},
     {"label": "Tags", "value": "tag"},
 ]
+MOVEMENT_BASIS_OPTIONS = [
+    {"label": "PCA", "value": "pca"},
+    {"label": "MDS", "value": "mds"},
+]
 
 STATUS_COLORS = {
     "ok": "#0d6efd",
@@ -289,7 +293,16 @@ def _centroid_figure(rows: list[dict], selected_group_key: str | None, x_key: st
     ).update_layout(title=title, template="plotly_white", xaxis_title=x_key.upper(), yaxis_title=y_key.upper())
 
 
-def _selected_group_summary(row: dict | None):
+def _selected_group_summary(
+    row: dict | None,
+    temporal_row: dict | None = None,
+    bucket_granularity: str = "week",
+    movement_basis: str | None = "pca",
+    selected_cluster_row: dict | None = None,
+    all_group_rows: list[dict] | None = None,
+    temporal_payload: dict | None = None,
+    group_type: str = "source",
+):
     if not isinstance(row, dict):
         return dbc.Alert("No group is available for the current selection.", color="warning", className="mb-0")
 
@@ -308,6 +321,14 @@ def _selected_group_summary(row: dict | None):
         dbc.CardBody(
             [
                 html.H5(str(row.get("group") or "Selected Group"), className="card-title"),
+                _group_temporal_scope_summary(temporal_row, bucket_granularity, movement_basis, selected_cluster_row),
+                _cluster_peer_movement_callout(
+                    all_group_rows or [],
+                    row,
+                    temporal_payload or {},
+                    group_type,
+                    movement_basis,
+                ),
                 dbc.Table(
                     [
                         html.Tbody([html.Tr([html.Th(label), html.Td(str(value))]) for label, value in metrics]),
@@ -322,14 +343,23 @@ def _selected_group_summary(row: dict | None):
     )
 
 
-def _nearest_groups_table(row: dict | None):
+def _nearest_groups_table(row: dict | None, movement_basis: str | None = "pca"):
     rows = row.get("nearest_groups", []) if isinstance(row, dict) and isinstance(row.get("nearest_groups"), list) else []
     if not rows:
         return dbc.Alert("No nearest-neighbor rows are available for the selected group.", color="warning", className="mb-0")
+    notes = []
+    if str(movement_basis or "").strip().lower() == "mds":
+        notes.append(
+            html.P(
+                "Nearest-neighbor distances remain PCA-based while the movement path uses MDS coordinates.",
+                className="text-muted mb-3",
+            )
+        )
     return dbc.Card(
         dbc.CardBody(
             [
                 html.H5("Nearest Groups", className="card-title"),
+                *notes,
                 dbc.Table(
                     [
                         html.Thead(html.Tr([html.Th("Group"), html.Th("Distance")])),
@@ -686,6 +716,394 @@ def _group_table(rows: list[dict], selected_group_key: str | None, selected_clus
     )
 
 
+def _selected_temporal_group_row(temporal_payload: dict, group_type: str, selected_group_key: str | None) -> dict | None:
+    if not isinstance(temporal_payload, dict):
+        return None
+    groups = temporal_payload.get("groups") if isinstance(temporal_payload.get("groups"), dict) else {}
+    rows = groups.get(group_type) if isinstance(groups.get(group_type), list) else []
+    normalized_selected = str(selected_group_key or "").strip().lower()
+    if normalized_selected:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_key = str(row.get("group_key") or row.get("group") or "").strip().lower()
+            if row_key == normalized_selected:
+                return row
+    for row in rows:
+        if isinstance(row, dict):
+            return row
+    return None
+
+
+def _movement_basis_config(movement_basis: str | None) -> dict[str, object]:
+    basis = "mds" if str(movement_basis or "").strip().lower() == "mds" else "pca"
+    if basis == "mds":
+        return {
+            "basis": "mds",
+            "title": "MDS Centroid Path",
+            "x_key": "mds1",
+            "y_key": "mds2",
+            "x_label": "MDS1",
+            "y_label": "MDS2",
+            "dispersion_key": "dispersion_mds",
+            "dispersion_label": "MDS dispersion",
+            "valid_bucket_label": "Valid MDS buckets",
+            "valid_bucket_count_key": "valid_mds_bucket_count",
+            "total_movement_key": "total_movement_mds",
+            "largest_jump_key": "largest_jump_mds",
+            "direction_key": "direction_mds",
+            "direction_dimensions": (("mds1", "MDS1"), ("mds2", "MDS2")),
+        }
+    return {
+        "basis": "pca",
+        "title": "PCA Centroid Path",
+        "x_key": "pc1",
+        "y_key": "pc2",
+        "x_label": "PC1",
+        "y_label": "PC2",
+        "dispersion_key": "dispersion_pca",
+        "dispersion_label": "PCA dispersion",
+        "valid_bucket_label": "Valid PCA buckets",
+        "valid_bucket_count_key": "valid_pca_bucket_count",
+        "total_movement_key": "total_movement_pca",
+        "largest_jump_key": "largest_jump_pca",
+        "direction_key": "direction_pca",
+        "direction_dimensions": (("pc1", "PC1"), ("pc2", "PC2")),
+    }
+
+
+def _group_movement_figure(
+    temporal_row: dict | None,
+    bucket_granularity: str = "week",
+    movement_basis: str | None = "pca",
+) -> go.Figure:
+    granularity_label = str(bucket_granularity or "week").strip().title() or "Week"
+    basis_config = _movement_basis_config(movement_basis)
+    title = f"{granularity_label} {basis_config['title']}"
+    x_key = str(basis_config["x_key"])
+    y_key = str(basis_config["y_key"])
+    x_label = str(basis_config["x_label"])
+    y_label = str(basis_config["y_label"])
+    dispersion_key = str(basis_config["dispersion_key"])
+    dispersion_label = str(basis_config["dispersion_label"])
+    if not isinstance(temporal_row, dict):
+        return _empty_figure(
+            title,
+            "No temporal group path is available for the current selection.",
+        )
+
+    bucket_rows = temporal_row.get("buckets") if isinstance(temporal_row.get("buckets"), list) else []
+    plotted_rows = [
+        row
+        for row in bucket_rows
+        if isinstance(row, dict) and isinstance(row.get(x_key), (int, float)) and isinstance(row.get(y_key), (int, float))
+    ]
+    if not plotted_rows:
+        return _empty_figure(
+            title,
+            f"No {str(basis_config['basis']).upper()} centroid path is available for the selected group.",
+        )
+
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=[row.get(x_key) for row in plotted_rows],
+            y=[row.get(y_key) for row in plotted_rows],
+            mode="lines+markers",
+            line={"color": "#0d6efd", "width": 2},
+            marker={
+                "size": [max(10, min(24, int(row.get("n_articles") or 0) * 3)) for row in plotted_rows],
+                "color": [
+                    STATUS_COLORS.get("low_sample", "#ffc107")
+                    if str(row.get("status") or "") != "ok"
+                    else "#0d6efd"
+                    for row in plotted_rows
+                ],
+                "line": {"color": "#ffffff", "width": 1},
+            },
+            customdata=[
+                [
+                    row.get("bucket_start"),
+                    row.get("n_articles"),
+                    row.get("status"),
+                    row.get("corpus_share"),
+                    row.get(dispersion_key),
+                ]
+                for row in plotted_rows
+            ],
+            hovertemplate=(
+                "Bucket: %{customdata[0]}<br>Articles: %{customdata[1]}<br>Status: %{customdata[2]}"
+                f"<br>Corpus share: %{{customdata[3]:.2%}}<br>{dispersion_label}: %{{customdata[4]:.3f}}"
+                f"<br>{x_label}: %{{x:.3f}}<br>{y_label}: %{{y:.3f}}<extra></extra>"
+            ),
+            name="Path",
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=[plotted_rows[0].get(x_key)],
+            y=[plotted_rows[0].get(y_key)],
+            mode="markers+text",
+            text=["Start"],
+            textposition="top left",
+            marker={"size": 12, "color": "#198754", "symbol": "diamond"},
+            hovertemplate="Start<extra></extra>",
+            name="Start",
+        )
+    )
+    if len(plotted_rows) > 1:
+        figure.add_trace(
+            go.Scatter(
+                x=[plotted_rows[-1].get(x_key)],
+                y=[plotted_rows[-1].get(y_key)],
+                mode="markers+text",
+                text=["Latest"],
+                textposition="bottom right",
+                marker={"size": 12, "color": "#dc3545", "symbol": "diamond"},
+                hovertemplate="Latest<extra></extra>",
+                name="Latest",
+            )
+        )
+    figure.update_layout(
+        title=title,
+        template="plotly_white",
+        xaxis_title=x_label,
+        yaxis_title=y_label,
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1.0},
+    )
+    return figure
+
+
+def _format_direction_summary(direction: object, direction_dimensions: tuple[tuple[str, str], ...]) -> str:
+    if not isinstance(direction, dict):
+        return "n/a"
+    parts = []
+    for dimension_key, dimension_label in direction_dimensions:
+        delta = direction.get(f"{dimension_key}_delta")
+        if isinstance(delta, (int, float)):
+            parts.append(f"{dimension_label} {_format_decimal(delta, 2)}")
+    return ", ".join(parts) if parts else "n/a"
+
+
+def _movement_cluster_scope_text(selected_cluster_row: dict | None) -> str:
+    if isinstance(selected_cluster_row, dict):
+        cluster_label = str(selected_cluster_row.get("label") or selected_cluster_row.get("cluster_id") or "Selected cluster")
+        return f"Cluster scope: {cluster_label}."
+    return "Cluster scope: All groups."
+
+
+def _coverage_gap_ranges_text(coverage_gap_ranges: object, bucket_granularity: str = "week") -> str:
+    if not isinstance(coverage_gap_ranges, list):
+        return ""
+
+    labels = []
+    for gap in coverage_gap_ranges:
+        if not isinstance(gap, dict):
+            continue
+        label = str(gap.get("label") or "").strip()
+        if not label:
+            start_bucket = str(gap.get("start_bucket") or "").strip()
+            end_bucket = str(gap.get("end_bucket") or "").strip()
+            if start_bucket and end_bucket:
+                label = start_bucket if start_bucket == end_bucket else f"{start_bucket} to {end_bucket}"
+            else:
+                label = start_bucket or end_bucket
+        if label:
+            labels.append(label)
+
+    if not labels:
+        return ""
+
+    granularity_label = str(bucket_granularity or "week").strip().lower() or "week"
+    noun = "range" if len(labels) == 1 else "ranges"
+    return f" Missing {granularity_label} bucket {noun}: {', '.join(labels)}."
+
+
+def _group_movement_summary(
+    temporal_row: dict | None,
+    bucket_granularity: str = "week",
+    movement_basis: str | None = "pca",
+    selected_cluster_row: dict | None = None,
+):
+    granularity_label = str(bucket_granularity or "week").strip().title() or "Week"
+    if not isinstance(temporal_row, dict):
+        return dbc.Alert("No temporal movement summary is available for the current selection.", color="warning", className="mb-0")
+
+    basis_config = _movement_basis_config(movement_basis)
+    path_summary = temporal_row.get("path_summary") if isinstance(temporal_row.get("path_summary"), dict) else {}
+    coverage_gap_ranges_text = _coverage_gap_ranges_text(path_summary.get("coverage_gap_ranges"), bucket_granularity).strip()
+    metrics = [
+        ("Status", str(temporal_row.get("status") or "n/a")),
+        (f"{granularity_label} buckets", int(path_summary.get("bucket_count") or 0)),
+        (str(basis_config["valid_bucket_label"]), int(path_summary.get(str(basis_config["valid_bucket_count_key"])) or 0)),
+        ("Sparse buckets", int(path_summary.get("sparse_bucket_count") or 0)),
+        ("Coverage gaps", int(path_summary.get("coverage_gap_count") or 0)),
+        ("Total movement", _format_decimal(path_summary.get(str(basis_config["total_movement_key"])), 3)),
+        ("Largest jump", _format_decimal(path_summary.get(str(basis_config["largest_jump_key"])), 3)),
+        ("Direction", _format_direction_summary(path_summary.get(str(basis_config["direction_key"])), basis_config["direction_dimensions"])),
+        ("Date range", f"{temporal_row.get('date_start') or 'n/a'} to {temporal_row.get('date_end') or 'n/a'}"),
+    ]
+    notes = []
+    if coverage_gap_ranges_text:
+        notes.append(dbc.Alert(coverage_gap_ranges_text, color="light", className="py-2 mb-0"))
+    if str(temporal_row.get("status") or "") != "ok":
+        reason = str(temporal_row.get("reason") or "").strip()
+        if reason:
+            notes.append(dbc.Alert(reason, color="warning", className="py-2 mb-0"))
+
+    return dbc.Card(
+        dbc.CardBody(
+            [
+                html.H5(f"Movement Summary ({str(basis_config['basis']).upper()})", className="card-title"),
+                html.P(_movement_cluster_scope_text(selected_cluster_row), className="text-muted mb-3"),
+                dbc.Table(
+                    [html.Tbody([html.Tr([html.Th(label), html.Td(str(value))]) for label, value in metrics])],
+                    bordered=False,
+                    size="sm",
+                    class_name="mb-0",
+                ),
+                html.Div(notes, className="mt-3") if notes else None,
+            ]
+        ),
+        className="shadow-sm",
+    )
+
+
+def _group_temporal_scope_summary(
+    temporal_row: dict | None,
+    bucket_granularity: str = "week",
+    movement_basis: str | None = "pca",
+    selected_cluster_row: dict | None = None,
+):
+    granularity_label = str(bucket_granularity or "week").strip().lower() or "week"
+    if not isinstance(temporal_row, dict):
+        return dbc.Alert(
+            "No temporal bucket coverage is available for the current selection.",
+            color="warning",
+            className="mb-2 py-2",
+        )
+
+    basis_config = _movement_basis_config(movement_basis)
+    path_summary = temporal_row.get("path_summary") if isinstance(temporal_row.get("path_summary"), dict) else {}
+    bucket_count = int(path_summary.get("bucket_count") or temporal_row.get("n_buckets") or 0)
+    valid_bucket_count = int(path_summary.get(str(basis_config["valid_bucket_count_key"])) or 0)
+    sparse_bucket_count = int(path_summary.get("sparse_bucket_count") or 0)
+    coverage_gap_count = int(path_summary.get("coverage_gap_count") or 0)
+    coverage_gap_ranges_text = _coverage_gap_ranges_text(path_summary.get("coverage_gap_ranges"), bucket_granularity)
+    article_count = int(temporal_row.get("n_articles") or 0)
+    group_label = str(temporal_row.get("group") or "Selected group")
+    date_start = str(temporal_row.get("date_start") or "n/a")
+    date_end = str(temporal_row.get("date_end") or "n/a")
+    summary = (
+        f"Temporal scope: {group_label} spans {bucket_count} {granularity_label} bucket"
+        f"{'' if bucket_count == 1 else 's'} from {date_start} to {date_end} across "
+        f"{article_count} article{'' if article_count == 1 else 's'}. "
+        f"{_movement_cluster_scope_text(selected_cluster_row)} "
+        f"Movement basis: {str(basis_config['basis']).upper()} centroid path. "
+        f"{valid_bucket_count} valid {str(basis_config['basis']).upper()} bucket"
+        f"{'' if valid_bucket_count == 1 else 's'}, "
+        f"{sparse_bucket_count} sparse bucket{'' if sparse_bucket_count == 1 else 's'}, "
+        f"{coverage_gap_count} coverage gap{'' if coverage_gap_count == 1 else 's'}."
+        f"{coverage_gap_ranges_text}"
+    )
+    return dbc.Alert(summary, color="light", className="mb-2 py-2")
+
+
+def _cluster_peer_movement_callout(
+    all_group_rows: list[dict],
+    selected_row: dict | None,
+    temporal_payload: dict,
+    group_type: str,
+    movement_basis: str | None = "pca",
+):
+    if not isinstance(selected_row, dict):
+        return None
+
+    selected_group_label = str(selected_row.get("group") or "Selected group")
+    selected_group_key = str(selected_row.get("group_key") or selected_group_label).strip().lower()
+    selected_cluster_id = str(selected_row.get("cluster_id") or "").strip().lower()
+    selected_cluster_label = str(selected_row.get("cluster_label") or "this cluster")
+    if not selected_cluster_id:
+        return None
+
+    groups = temporal_payload.get("groups") if isinstance(temporal_payload.get("groups"), dict) else {}
+    temporal_rows = groups.get(group_type) if isinstance(groups.get(group_type), list) else []
+    temporal_rows_by_key = {}
+    for temporal_row in temporal_rows:
+        if not isinstance(temporal_row, dict):
+            continue
+        temporal_group_key = str(temporal_row.get("group_key") or temporal_row.get("group") or "").strip().lower()
+        if temporal_group_key:
+            temporal_rows_by_key[temporal_group_key] = temporal_row
+
+    basis_config = _movement_basis_config(movement_basis)
+    basis_label = str(basis_config["basis"]).upper()
+    total_movement_key = str(basis_config["total_movement_key"])
+    peer_values: list[tuple[str, float]] = []
+    selected_value: float | None = None
+    cluster_group_count = 0
+
+    for group_row in all_group_rows:
+        if not isinstance(group_row, dict):
+            continue
+        group_cluster_id = str(group_row.get("cluster_id") or "").strip().lower()
+        if group_cluster_id != selected_cluster_id:
+            continue
+        cluster_group_count += 1
+        group_key = str(group_row.get("group_key") or group_row.get("group") or "").strip().lower()
+        if not group_key:
+            continue
+        temporal_row = temporal_rows_by_key.get(group_key)
+        path_summary = temporal_row.get("path_summary") if isinstance(temporal_row, dict) and isinstance(temporal_row.get("path_summary"), dict) else {}
+        total_movement = path_summary.get(total_movement_key)
+        if not isinstance(total_movement, (int, float)):
+            continue
+        if group_key == selected_group_key:
+            selected_value = float(total_movement)
+            continue
+        peer_values.append((str(group_row.get("group") or "Unknown"), float(total_movement)))
+
+    if cluster_group_count < 2:
+        return dbc.Alert(
+            f"Cluster movement context: {selected_cluster_label} contains only this selected group, so there are no cluster peers to compare.",
+            color="light",
+            className="mb-3 py-2",
+        )
+
+    if selected_value is None:
+        return dbc.Alert(
+            f"Cluster movement context: {selected_group_label} does not yet have a comparable {basis_label} total movement in {selected_cluster_label}.",
+            color="light",
+            className="mb-3 py-2",
+        )
+
+    if not peer_values:
+        return dbc.Alert(
+            f"Cluster movement context: {selected_group_label} has no peer groups with comparable {basis_label} movement totals in {selected_cluster_label}.",
+            color="light",
+            className="mb-3 py-2",
+        )
+
+    peer_average = sum(value for _, value in peer_values) / len(peer_values)
+    difference = selected_value - peer_average
+    if abs(difference) < 0.005:
+        comparison_text = f"in line with the {selected_cluster_label} peer average of {_format_decimal(peer_average)}"
+    elif difference > 0:
+        comparison_text = (
+            f"{_format_decimal(difference)} above the {selected_cluster_label} peer average of {_format_decimal(peer_average)}"
+        )
+    else:
+        comparison_text = (
+            f"{_format_decimal(abs(difference))} below the {selected_cluster_label} peer average of {_format_decimal(peer_average)}"
+        )
+    rank = 1 + sum(1 for _, value in peer_values if value > selected_value)
+    summary = (
+        f"Cluster movement context: {selected_group_label} has {basis_label} total movement {_format_decimal(selected_value)}, "
+        f"{comparison_text}, and ranks {rank} of {cluster_group_count} in its cluster."
+    )
+    return dbc.Alert(summary, color="light", className="mb-3 py-2")
+
+
 layout = dbc.Container(
     [
         dcc.Interval(id="news-group-latent-load", interval=50, n_intervals=0, max_intervals=1),
@@ -778,6 +1196,31 @@ layout = dbc.Container(
                 dbc.Col(dcc.Graph(id="news-group-latent-mds"), lg=6, className="mb-3"),
             ]
         ),
+        dbc.Row(
+            [
+                dbc.Col(
+                    [
+                        html.Div(id="news-group-latent-movement-scope"),
+                        html.Div(
+                            [
+                                dbc.Label("Movement basis", className="mb-1"),
+                                dbc.RadioItems(
+                                    id="news-group-latent-movement-basis",
+                                    options=MOVEMENT_BASIS_OPTIONS,
+                                    value="pca",
+                                    inline=True,
+                                    class_name="mb-2",
+                                ),
+                            ]
+                        ),
+                        dcc.Graph(id="news-group-latent-movement"),
+                    ],
+                    lg=8,
+                    className="mb-3",
+                ),
+                dbc.Col(html.Div(id="news-group-latent-movement-summary"), lg=4, className="mb-3"),
+            ]
+        ),
         dbc.Row([dbc.Col(html.Div(id="news-group-latent-table"), width=12, className="mb-3")]),
         dbc.Row([dbc.Col(html.Div(id="news-group-latent-cluster-summary"), width=12, className="mb-3")]),
         dbc.Row(
@@ -802,6 +1245,9 @@ layout = dbc.Container(
     Output("news-group-latent-group", "value"),
     Output("news-group-latent-pca", "figure"),
     Output("news-group-latent-mds", "figure"),
+    Output("news-group-latent-movement", "figure"),
+    Output("news-group-latent-movement-scope", "children"),
+    Output("news-group-latent-movement-summary", "children"),
     Output("news-group-latent-table", "children"),
     Output("news-group-latent-cluster-summary", "children"),
     Output("news-group-latent-selected", "children"),
@@ -812,6 +1258,7 @@ layout = dbc.Container(
     Input("news-group-latent-type", "value"),
     Input("news-group-latent-cluster", "value"),
     Input("news-group-latent-group", "value"),
+    Input("news-group-latent-movement-basis", "value"),
     State("news-group-latent-mode", "value"),
     State("news-group-latent-snapshot-date", "value"),
 )
@@ -821,6 +1268,7 @@ def load_news_group_latent_space(
     group_type,
     selected_cluster_id,
     selected_group_key,
+    movement_basis,
     data_mode,
     snapshot_date,
 ):
@@ -836,14 +1284,38 @@ def load_news_group_latent_space(
 
     empty_pca = _empty_figure("PCA Group Centroids")
     empty_mds = _empty_figure("MDS Group Centroids")
+    movement_title = f"Weekly {_movement_basis_config(movement_basis)['title']}"
+    empty_movement = _empty_figure(movement_title)
     if status_code != 200:
         error = payload.get("error", "Unknown error")
         alert = dbc.Alert(f"Stats error ({status_code}): {error}", color="danger")
-        return alert, [], [], None, [], None, empty_pca, empty_mds, alert, alert, alert, alert, alert
+        return (
+            alert,
+            [],
+            [],
+            None,
+            [],
+            None,
+            empty_pca,
+            empty_mds,
+            empty_movement,
+            alert,
+            alert,
+            alert,
+            alert,
+            alert,
+            alert,
+            alert,
+        )
 
     meta = payload.get("meta", {}) if isinstance(payload.get("meta"), dict) else {}
     derived = payload.get("data", {}).get("derived", {}) if isinstance(payload.get("data"), dict) else {}
     group_latent = derived.get("group_latent_space", {}) if isinstance(derived.get("group_latent_space"), dict) else {}
+    group_temporal = (
+        derived.get("group_temporal_latent_space")
+        if isinstance(derived.get("group_temporal_latent_space"), dict)
+        else {}
+    )
     status = str(group_latent.get("status") or "unavailable")
     reason = str(group_latent.get("reason") or "").strip()
     groups = group_latent.get("groups", {}) if isinstance(group_latent.get("groups"), dict) else {}
@@ -865,6 +1337,12 @@ def load_news_group_latent_space(
     group_options = _group_options(filtered_rows)
     selected_row = _selected_group_row(filtered_rows, selected_group_key, selected_cluster)
     selected_value = str(selected_row.get("group_key")) if isinstance(selected_row, dict) else None
+    bucket_granularity = (
+        str(group_temporal.get("config", {}).get("bucket_granularity") or "week")
+        if isinstance(group_temporal.get("config"), dict)
+        else "week"
+    )
+    temporal_row = _selected_temporal_group_row(group_temporal, effective_group_type, selected_value)
 
     if status != "ok":
         message = reason or "Group latent space is unavailable for the current dataset."
@@ -878,6 +1356,9 @@ def load_news_group_latent_space(
             selected_value,
             _empty_figure("PCA Group Centroids", message),
             _empty_figure("MDS Group Centroids", message),
+            _empty_figure(movement_title, message),
+            warning,
+            warning,
             warning,
             warning,
             warning,
@@ -913,6 +1394,9 @@ def load_news_group_latent_space(
         selected_value,
         _centroid_figure(rows, selected_value, "pc1", "pc2", "PCA Group Centroids"),
         _centroid_figure(rows, selected_value, "mds1", "mds2", "MDS Group Centroids"),
+        _group_movement_figure(temporal_row, bucket_granularity, movement_basis),
+        _group_temporal_scope_summary(temporal_row, bucket_granularity, movement_basis, selected_cluster),
+        _group_movement_summary(temporal_row, bucket_granularity, movement_basis, selected_cluster),
         _group_table(filtered_rows, selected_value, selected_cluster),
         html.Div(
             [
@@ -921,8 +1405,17 @@ def load_news_group_latent_space(
                 _cluster_membership_summary(selected_cluster),
             ]
         ),
-        _selected_group_summary(selected_row),
-        _nearest_groups_table(selected_row),
+        _selected_group_summary(
+            selected_row,
+            temporal_row,
+            bucket_granularity,
+            movement_basis,
+            selected_cluster,
+            rows,
+            group_temporal,
+            effective_group_type,
+        ),
+        _nearest_groups_table(selected_row, movement_basis),
         _lens_deviation_table(selected_row),
     )
 
