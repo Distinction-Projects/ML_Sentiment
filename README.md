@@ -185,7 +185,7 @@ python -m src.analytics.build_news_snapshot --output data/processed/news_analyti
 
 `RSS_SOURCE_EFFECT_PERMUTATIONS` controls pooled source tests. `RSS_SOURCE_DIFF_SLICE_PERMUTATIONS` controls repeated within-topic/within-tag source-differentiation tests, which should usually stay lower for reliable deploy-time snapshot builds.
 
-If `NEWS_STATS_BACKEND=precomputed` and the snapshot is missing or invalid, `/api/news/stats` returns `503` instead of falling back to request-time analytics.
+If `NEWS_STATS_BACKEND=precomputed` and the snapshot is missing or invalid, `/api/news/stats` and `/api/news/export` fall back to request-time analytics with `Cache-Control: no-store` and `meta.stats_backend_fallback=precomputed_unavailable`.
 
 Event-controlled source analysis is included under `derived.event_control`. It uses embeddings to cluster likely same-story articles, then reruns source differentiation only within multi-source event clusters. Missing embedding credentials do not break stats generation; the event-control block returns `status: unavailable`.
 

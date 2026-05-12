@@ -141,6 +141,13 @@ def _export_meta_from_payload(payload: dict[str, Any], filtered_count: int, retu
     }
 
 
+def _mark_precomputed_fallback(meta: dict[str, Any], error: PrecomputedStatsError) -> dict[str, Any]:
+    meta["stats_backend"] = "dynamic"
+    meta["stats_backend_fallback"] = "precomputed_unavailable"
+    meta["precomputed_stats_error"] = str(error)
+    return meta
+
+
 def _select_lens_correlations(payload: dict[str, Any]) -> dict[str, Any]:
     analysis_obj = _analysis_obj_from_payload(payload)
     upstream = analysis_obj.get("lens_correlations")
@@ -903,29 +910,27 @@ class NewsController:
     def get_stats(self, *, refresh: str | None, snapshot_date: str | None) -> ControllerResponse:
         force_refresh = _parse_refresh(refresh)
         snapshot_date_value: str | None = None
+        precomputed_error: PrecomputedStatsError | None = None
 
         try:
             snapshot_date_value = parse_snapshot_date(snapshot_date)
             if snapshot_date_value is None and stats_backend_mode() == "precomputed":
-                return _response_json(
-                    200,
-                    load_precomputed_stats_response(),
-                    headers=_read_cache_headers(
-                        force_refresh=force_refresh,
-                        snapshot_date=None,
-                        seconds_env="NEWS_STATS_HTTP_CACHE_SECONDS",
-                        default_seconds=300,
-                    ),
-                )
+                try:
+                    return _response_json(
+                        200,
+                        load_precomputed_stats_response(),
+                        headers=_read_cache_headers(
+                            force_refresh=force_refresh,
+                            snapshot_date=None,
+                            seconds_env="NEWS_STATS_HTTP_CACHE_SECONDS",
+                            default_seconds=300,
+                        ),
+                    )
+                except PrecomputedStatsError as exc:
+                    precomputed_error = exc
             bundle = self.client.get_payload(force_refresh=force_refresh, snapshot_date=snapshot_date_value)
         except ValueError as exc:
             return _response_json(400, {"status": "bad_request", "error": str(exc)})
-        except PrecomputedStatsError as exc:
-            return _response_json(
-                503,
-                {"status": "precomputed_stats_unavailable", "error": str(exc), "data": None},
-                headers=_no_store_headers(),
-            )
         except RssDigestNotFoundError as exc:
             if snapshot_date_value:
                 return _response_json(404, {"status": "not_found", "error": str(exc)})
@@ -935,23 +940,28 @@ class NewsController:
 
         stats = bundle.get("stats") if isinstance(bundle.get("stats"), dict) else {}
         article_count = len(bundle.get("articles_normalized", []))
+        meta = _common_meta(bundle, filtered_count=article_count, returned_count=article_count)
+        headers = _read_cache_headers(
+            force_refresh=force_refresh,
+            snapshot_date=snapshot_date_value,
+            seconds_env="NEWS_STATS_HTTP_CACHE_SECONDS",
+            default_seconds=300,
+        )
+        if precomputed_error is not None:
+            meta = _mark_precomputed_fallback(meta, precomputed_error)
+            headers = _no_store_headers()
         return _response_json(
             200,
             {
                 "status": "ok",
-                "meta": _common_meta(bundle, filtered_count=article_count, returned_count=article_count),
+                "meta": meta,
                 "data": {
                     "derived": stats,
                     "summary": bundle.get("summary", {}),
                     "analysis": bundle.get("analysis", {}),
                 },
             },
-            headers=_read_cache_headers(
-                force_refresh=force_refresh,
-                snapshot_date=snapshot_date_value,
-                seconds_env="NEWS_STATS_HTTP_CACHE_SECONDS",
-                default_seconds=300,
-            ),
+            headers=headers,
         )
 
     def get_upstream(self, *, refresh: str | None, snapshot_date: str | None) -> ControllerResponse:
@@ -998,6 +1008,7 @@ class NewsController:
         snapshot_date_value: str | None = None
         artifact_value = (artifact or "").strip()
         export_format_value = (export_format or "csv").strip().lower()
+        precomputed_error: PrecomputedStatsError | None = None
 
         allowed_artifacts = {
             "event_clusters",
@@ -1038,17 +1049,15 @@ class NewsController:
             )
             snapshot_date_value = parse_snapshot_date(snapshot_date)
             if snapshot_date_value is None and stats_backend_mode() == "precomputed":
-                payload = load_precomputed_stats_response()
+                try:
+                    payload = load_precomputed_stats_response()
+                except PrecomputedStatsError as exc:
+                    precomputed_error = exc
+                    payload = self.client.get_payload(force_refresh=force_refresh, snapshot_date=snapshot_date_value)
             else:
                 payload = self.client.get_payload(force_refresh=force_refresh, snapshot_date=snapshot_date_value)
         except ValueError as exc:
             return _response_json(400, {"status": "bad_request", "error": str(exc)})
-        except PrecomputedStatsError as exc:
-            return _response_json(
-                503,
-                {"status": "precomputed_stats_unavailable", "error": str(exc), "rows": []},
-                headers=_no_store_headers(),
-            )
         except RssDigestNotFoundError as exc:
             if snapshot_date_value:
                 return _response_json(404, {"status": "not_found", "error": str(exc)})
@@ -1064,6 +1073,10 @@ class NewsController:
             bucket_label=normalized_bucket_label,
         )
         meta = _export_meta_from_payload(payload, filtered_count=len(rows), returned_count=len(rows))
+        headers = _read_cache_headers(force_refresh=force_refresh, snapshot_date=snapshot_date_value)
+        if precomputed_error is not None:
+            meta = _mark_precomputed_fallback(meta, precomputed_error)
+            headers = _no_store_headers()
         filters = None
         if normalized_group_type or normalized_bucket_label:
             filters = {}
@@ -1084,7 +1097,7 @@ class NewsController:
                     "filters": filters,
                     "rows": rows,
                 },
-                headers=_read_cache_headers(force_refresh=force_refresh, snapshot_date=snapshot_date_value),
+                headers=headers,
             )
 
         csv_payload = _rows_to_csv(rows)
@@ -1094,7 +1107,7 @@ class NewsController:
             content_type="text/csv; charset=utf-8",
             headers={
                 "Content-Disposition": f'attachment; filename="{artifact_value}.csv"',
-                **_read_cache_headers(force_refresh=force_refresh, snapshot_date=snapshot_date_value),
+                **headers,
             },
         )
 

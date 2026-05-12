@@ -2121,7 +2121,7 @@ class FastApiNewsEndpointTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "bad_request")
         self.assertIn("group_key requires group_type", response.json()["error"])
 
-    def test_stats_precomputed_mode_serves_snapshot_and_missing_returns_503(self):
+    def test_stats_precomputed_mode_serves_snapshot_and_missing_falls_back(self):
         snapshot_payload = {
             "status": "ok",
             "meta": {"source_url": "file://precomputed.json", "source_mode": "current"},
@@ -2177,14 +2177,24 @@ class FastApiNewsEndpointTests(unittest.TestCase):
 
             os.environ["NEWS_STATS_SNAPSHOT_PATH"] = str(self.temp_dir / "missing_precomputed_stats.json")
             missing = self.client.get("/api/news/stats")
-            self.assertEqual(missing.status_code, 503)
+            self.assertEqual(missing.status_code, 200)
             self.assertEqual(missing.headers.get("cache-control"), "no-store")
-            self.assertEqual(missing.json()["status"], "precomputed_stats_unavailable")
+            missing_payload = missing.json()
+            self.assertEqual(missing_payload["status"], "ok")
+            self.assertEqual(missing_payload["meta"]["stats_backend"], "dynamic")
+            self.assertEqual(missing_payload["meta"]["stats_backend_fallback"], "precomputed_unavailable")
+            self.assertIn("missing_precomputed_stats.json", missing_payload["meta"]["precomputed_stats_error"])
+            self.assertIsInstance(missing_payload["data"]["derived"], dict)
 
             missing_export = self.client.get("/api/news/export?artifact=event_control_summary&format=json")
-            self.assertEqual(missing_export.status_code, 503)
+            self.assertEqual(missing_export.status_code, 200)
             self.assertEqual(missing_export.headers.get("cache-control"), "no-store")
-            self.assertEqual(missing_export.json()["status"], "precomputed_stats_unavailable")
+            missing_export_payload = missing_export.json()
+            self.assertEqual(missing_export_payload["status"], "ok")
+            self.assertEqual(missing_export_payload["meta"]["stats_backend"], "dynamic")
+            self.assertEqual(missing_export_payload["meta"]["stats_backend_fallback"], "precomputed_unavailable")
+            self.assertIn("missing_precomputed_stats.json", missing_export_payload["meta"]["precomputed_stats_error"])
+            self.assertIsInstance(missing_export_payload["rows"], list)
         finally:
             if previous_backend is None:
                 os.environ.pop("NEWS_STATS_BACKEND", None)

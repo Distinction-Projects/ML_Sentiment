@@ -209,7 +209,7 @@ function ReferenceLinks({ keys }) {
     ));
 }
 
-export async function render() {
+export async function render(searchParams) {
   const measuredRows = SOURCE_ROWS.filter((row) => Number.isFinite(row.usePct));
   const averageUse = measuredRows.reduce((total, row) => total + row.usePct, 0) / measuredRows.length;
   const averageAwareness = measuredRows.reduce((total, row) => total + row.awarenessPct, 0) / measuredRows.length;
