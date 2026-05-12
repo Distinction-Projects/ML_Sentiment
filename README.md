@@ -26,6 +26,7 @@ The important runtime behavior is that daily upstream JSON updates do not requir
 - `/news/digest`
 - `/news/stats`
 - `/news/sources`
+- `/news/source-influence`
 - `/news/lenses`
 - `/news/lens-matrix`
 - `/news/lens-correlations`

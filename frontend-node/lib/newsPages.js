@@ -18,6 +18,12 @@ export const NEWS_PAGES = [
       "Compare article volume and scoring coverage across sources."
   },
   {
+    slug: "source-influence",
+    title: "News Source Influence",
+    summary:
+      "Document which RSS sources NewsLens pulls from and why the set has large U.S. and global audience reach."
+  },
+  {
     slug: "lenses",
     title: "News Lenses",
     summary:

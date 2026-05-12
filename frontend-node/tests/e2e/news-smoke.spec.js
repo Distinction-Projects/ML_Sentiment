@@ -4,6 +4,7 @@ const NEWS_ROUTE_EXPECTATIONS = [
   { path: "/news/digest", heading: "News Digest" },
   { path: "/news/stats", heading: "News Stats" },
   { path: "/news/sources", heading: "News Sources" },
+  { path: "/news/source-influence", heading: "News Source Influence" },
   { path: "/news/lenses", heading: "News Lenses" },
   { path: "/news/lens-matrix", heading: "News Lens Matrix" },
   { path: "/news/lens-correlations", heading: "News Lens Correlations" },
