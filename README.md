@@ -333,6 +333,8 @@ Set `NEXT_PUBLIC_NEWS_API_BASE_URL` in `.env.local` if your backend URL differs 
 
 When the Next app is served behind a public reverse proxy, set the canonical public URL so generated metadata and absolute URLs do not point back to the raw server IP:
 
+Production domain: `https://lab.spectralresidue.com/`
+
 ```bash
 NEXT_PUBLIC_SITE_URL=https://lab.spectralresidue.com
 ```
