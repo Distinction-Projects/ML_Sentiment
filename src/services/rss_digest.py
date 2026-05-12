@@ -4001,6 +4001,152 @@ def _coverage_gap_ranges(bucket_dates: list[date], granularity: str) -> list[dic
     return ranges
 
 
+def _share_delta_direction(value: Any) -> str | None:
+    if not isinstance(value, (int, float)):
+        return None
+    if abs(float(value)) < 0.0005:
+        return "flat"
+    return "rising" if float(value) > 0 else "falling"
+
+
+def _popularity_momentum_label(share_delta: Any, recent_share_delta: Any) -> str | None:
+    overall_direction = _share_delta_direction(share_delta)
+    recent_direction = _share_delta_direction(recent_share_delta)
+
+    if overall_direction == "rising":
+        if recent_direction == "rising":
+            return "rising now"
+        if recent_direction == "falling":
+            return "cooling after gains"
+        return "holding gains"
+    if overall_direction == "falling":
+        if recent_direction == "rising":
+            return "rebounding"
+        if recent_direction == "falling":
+            return "still falling"
+        return "holding losses"
+    if overall_direction == "flat":
+        if recent_direction == "rising":
+            return "rebounding to baseline"
+        if recent_direction == "falling":
+            return "slipping from baseline"
+        return "flat"
+    if recent_direction == "rising":
+        return "recently rising"
+    if recent_direction == "falling":
+        return "recently falling"
+    return recent_direction
+
+
+def _temporal_group_popularity_summary(bucket_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    plotted_rows: list[dict[str, Any]] = []
+    for bucket_row in bucket_rows:
+        if not isinstance(bucket_row, dict):
+            continue
+        bucket_label = str(bucket_row.get("bucket_label") or bucket_row.get("bucket_start") or "").strip()
+        n_articles = bucket_row.get("n_articles")
+        corpus_share = bucket_row.get("corpus_share")
+        if not bucket_label or (not isinstance(n_articles, (int, float)) and not isinstance(corpus_share, (int, float))):
+            continue
+        plotted_rows.append(
+            {
+                "label": bucket_label,
+                "articles": int(n_articles or 0),
+                "corpus_share": float(corpus_share) if isinstance(corpus_share, (int, float)) else None,
+            }
+        )
+
+    if not plotted_rows:
+        return {}
+
+    peak_articles_row = max(plotted_rows, key=lambda row: int(row["articles"]))
+    first_share = next((row["corpus_share"] for row in plotted_rows if isinstance(row["corpus_share"], float)), None)
+    latest_share = next(
+        (row["corpus_share"] for row in reversed(plotted_rows) if isinstance(row["corpus_share"], float)),
+        None,
+    )
+    previous_share = next(
+        (row["corpus_share"] for row in reversed(plotted_rows[:-1]) if isinstance(row["corpus_share"], float)),
+        None,
+    )
+    share_delta = (
+        float(latest_share) - float(first_share)
+        if isinstance(first_share, float) and isinstance(latest_share, float)
+        else None
+    )
+    recent_share_delta = (
+        float(latest_share) - float(previous_share)
+        if isinstance(previous_share, float) and isinstance(latest_share, float)
+        else None
+    )
+    share_direction = _share_delta_direction(share_delta)
+    recent_share_direction = _share_delta_direction(recent_share_delta)
+    return {
+        "peak_bucket": str(peak_articles_row["label"]),
+        "peak_articles": int(peak_articles_row["articles"]),
+        "first_share": first_share,
+        "latest_share": latest_share,
+        "share_delta": share_delta,
+        "recent_share_delta": recent_share_delta,
+        "share_direction": share_direction,
+        "recent_share_direction": recent_share_direction,
+        "momentum_label": _popularity_momentum_label(share_delta, recent_share_delta),
+    }
+
+
+def _rank_temporal_popularity_rows(
+    temporal_rows: list[dict[str, Any]],
+    *,
+    metric_field: str,
+    rank_field: str,
+) -> None:
+    ranked_rows = [
+        row
+        for row in temporal_rows
+        if isinstance(row, dict)
+        and isinstance(row.get("popularity_summary"), dict)
+        and isinstance(row["popularity_summary"].get(metric_field), (int, float))
+    ]
+    ranked_rows.sort(
+        key=lambda row: (
+            -float(row["popularity_summary"].get(metric_field) or 0.0),
+            -float(
+                row["popularity_summary"].get("recent_share_delta")
+                if isinstance(row["popularity_summary"].get("recent_share_delta"), (int, float))
+                else -999.0
+            ),
+            -int(row["popularity_summary"].get("peak_articles") or 0),
+            -int(row.get("n_articles") or 0),
+            str(row.get("group") or "").lower(),
+        )
+    )
+    for index, row in enumerate(ranked_rows, start=1):
+        popularity_summary = row.get("popularity_summary")
+        if isinstance(popularity_summary, dict):
+            popularity_summary[rank_field] = index
+
+
+def _annotate_temporal_popularity_rank_trajectory(temporal_rows: list[dict[str, Any]]) -> None:
+    _rank_temporal_popularity_rows(
+        temporal_rows,
+        metric_field="first_share",
+        rank_field="first_share_rank",
+    )
+    _rank_temporal_popularity_rows(
+        temporal_rows,
+        metric_field="latest_share",
+        rank_field="latest_share_rank",
+    )
+    for row in temporal_rows:
+        popularity_summary = row.get("popularity_summary")
+        if not isinstance(popularity_summary, dict):
+            continue
+        first_rank = popularity_summary.get("first_share_rank")
+        latest_rank = popularity_summary.get("latest_share_rank")
+        if isinstance(first_rank, int) and isinstance(latest_rank, int):
+            popularity_summary["rank_change"] = int(first_rank) - int(latest_rank)
+
+
 def _group_temporal_latent_space_from_records(
     article_lens_percentages: list[dict[str, float]],
     source_labels: list[str],
@@ -4277,6 +4423,7 @@ def _group_temporal_latent_space_from_records(
                     else None
                 ),
             }
+            popularity_summary = _temporal_group_popularity_summary(bucket_rows)
             status = "ok" if len(valid_pca_rows) >= min_buckets_per_group else "sparse"
             temporal_groups[group_type].append(
                 {
@@ -4295,12 +4442,14 @@ def _group_temporal_latent_space_from_records(
                     "date_end": bucket_rows[-1]["bucket_end"] if bucket_rows else None,
                     "buckets": bucket_rows,
                     "path_summary": path_summary,
+                    "popularity_summary": popularity_summary,
                 }
             )
 
         temporal_groups[group_type].sort(
             key=lambda row: (-int(row.get("n_articles") or 0), -int(row.get("n_buckets") or 0), str(row.get("group") or "").lower())
         )
+        _annotate_temporal_popularity_rank_trajectory(temporal_groups[group_type])
 
     group_counts = {group_type: len(rows) for group_type, rows in temporal_groups.items()}
     moving_counts = {

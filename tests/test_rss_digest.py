@@ -793,6 +793,12 @@ class RssDigestServiceTests(unittest.TestCase):
         self.assertGreater(by_source["Source A"]["path_summary"]["total_movement_pca"], 0.0)
         self.assertIsNotNone(by_source["Source A"]["path_summary"]["direction_pca"])
         self.assertIsNotNone(by_source["Source A"]["path_summary"]["direction_mds"])
+        self.assertIn("share_direction", by_source["Source A"]["popularity_summary"])
+        self.assertIn("recent_share_direction", by_source["Source A"]["popularity_summary"])
+        self.assertIn("momentum_label", by_source["Source A"]["popularity_summary"])
+        self.assertIn("first_share_rank", by_source["Source A"]["popularity_summary"])
+        self.assertIn("latest_share_rank", by_source["Source A"]["popularity_summary"])
+        self.assertIn("rank_change", by_source["Source A"]["popularity_summary"])
 
         by_topic = {row["group"]: row for row in temporal["groups"]["topic"]}
         self.assertEqual(by_topic["Policy"]["status"], "ok")

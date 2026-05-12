@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import re
+from urllib.parse import urlencode
+
 import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, callback, ctx, dcc, html
 
-from src.pages.news_page_utils import api_get, build_news_intro, build_status_alert, snapshot_param
+from src.pages.news_page_utils import (
+    api_get,
+    build_news_intro,
+    build_status_alert,
+    mode_label,
+    snapshot_param,
+)
 
 
 dash.register_page(
@@ -57,6 +66,28 @@ def _format_decimal(value: object, digits: int = 3) -> str:
     if isinstance(value, (int, float)):
         return f"{float(value):.{digits}f}"
     return "n/a"
+
+
+def _format_percent(value: object, digits: int = 1) -> str:
+    if isinstance(value, (int, float)):
+        return f"{float(value):.{digits}%}"
+    return "n/a"
+
+
+def _normalize_group_lookup_key(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return re.sub(r"[\s_-]+", " ", text)
+
+
+def _row_group_value(row: object) -> str | None:
+    if not isinstance(row, dict):
+        return None
+    value = str(row.get("group_key") or row.get("group") or "").strip()
+    return value or None
+
+
+def _row_group_lookup_key(row: object) -> str:
+    return _normalize_group_lookup_key(_row_group_value(row))
 
 
 def _group_options(rows: list[dict]) -> list[dict]:
@@ -115,7 +146,7 @@ def _selected_group_row(
     selected_group_key: str | None,
     selected_cluster_row: dict | None = None,
 ) -> dict | None:
-    normalized_selected = str(selected_group_key or "").strip().lower()
+    normalized_selected = _normalize_group_lookup_key(selected_group_key)
     normalized_cluster_id = (
         str(selected_cluster_row.get("cluster_id") or "").strip().lower()
         if isinstance(selected_cluster_row, dict)
@@ -125,7 +156,7 @@ def _selected_group_row(
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            row_key = str(row.get("group_key") or row.get("group") or "").strip().lower()
+            row_key = _row_group_lookup_key(row)
             if row_key == normalized_selected:
                 if not normalized_cluster_id:
                     return row
@@ -198,6 +229,167 @@ def _cluster_filter_hint(
     return dbc.Alert(message, color="light", className="mb-0 py-2")
 
 
+def _group_temporal_export_href(
+    meta: dict | None,
+    artifact: str = "group_temporal_buckets",
+    export_format: str = "csv",
+    group_type: str | None = None,
+    group_key: str | None = None,
+) -> str:
+    params: dict[str, str] = {
+        "artifact": artifact,
+        "format": export_format,
+    }
+    normalized_group_type = str(group_type or "").strip().lower()
+    normalized_group_key = str(group_key or "").strip()
+    if normalized_group_type in {"source", "topic", "tag"}:
+        params["group_type"] = normalized_group_type
+    if normalized_group_key and "group_type" in params:
+        params["group_key"] = normalized_group_key
+    meta = meta if isinstance(meta, dict) else {}
+    if meta.get("source_mode") == "snapshot" and meta.get("snapshot_date"):
+        params["snapshot_date"] = str(meta["snapshot_date"])
+    return f"/api/news/export?{urlencode(params)}"
+
+
+def _group_temporal_export_panel(
+    meta: dict | None,
+    bucket_granularity: str = "week",
+    group_type: str | None = None,
+    group_key: str | None = None,
+):
+    granularity_label = str(bucket_granularity or "week").strip().title() or "Week"
+    normalized_group_type = str(group_type or "").strip().lower()
+    scope_description = (
+        f"the current {normalized_group_type} view"
+        if normalized_group_type in {"source", "topic", "tag"}
+        else "the loaded dataset"
+    )
+    if str(group_key or "").strip() and normalized_group_type in {"source", "topic", "tag"}:
+        scope_description = f"the selected {normalized_group_type}"
+    return dbc.Card(
+        dbc.CardBody(
+            [
+                html.H6("Export Temporal Movement Data", className="mb-2"),
+                html.P(
+                    (
+                        f"Download {scope_description} temporal movement rows for offline filtering. "
+                        f"Exports follow the current dataset mode: {mode_label(meta if isinstance(meta, dict) else {})}."
+                    ),
+                    className="text-muted mb-3",
+                ),
+                html.P(
+                    f"Bucket rows preserve per-{granularity_label.lower()} centroid coordinates, counts, and sparse-bucket diagnostics.",
+                    className="small text-muted mb-2",
+                ),
+                dbc.ButtonGroup(
+                    [
+                        dbc.Button(
+                            "Bucket Rows CSV",
+                            href=_group_temporal_export_href(
+                                meta,
+                                export_format="csv",
+                                group_type=group_type,
+                                group_key=group_key,
+                            ),
+                            color="primary",
+                            size="sm",
+                            target="_blank",
+                        ),
+                        dbc.Button(
+                            "Bucket Rows JSON",
+                            href=_group_temporal_export_href(
+                                meta,
+                                export_format="json",
+                                group_type=group_type,
+                                group_key=group_key,
+                            ),
+                            color="outline-primary",
+                            size="sm",
+                            target="_blank",
+                        ),
+                    ],
+                    size="sm",
+                ),
+                html.P(
+                    "Path summary rows preserve movement totals, direction deltas, and coverage-gap ranges for each group.",
+                    className="small text-muted mt-3 mb-2",
+                ),
+                dbc.ButtonGroup(
+                    [
+                        dbc.Button(
+                            "Path Summary CSV",
+                            href=_group_temporal_export_href(
+                                meta,
+                                artifact="group_temporal_path_summary",
+                                export_format="csv",
+                                group_type=group_type,
+                                group_key=group_key,
+                            ),
+                            color="primary",
+                            size="sm",
+                            target="_blank",
+                        ),
+                        dbc.Button(
+                            "Path Summary JSON",
+                            href=_group_temporal_export_href(
+                                meta,
+                                artifact="group_temporal_path_summary",
+                                export_format="json",
+                                group_type=group_type,
+                                group_key=group_key,
+                            ),
+                            color="outline-primary",
+                            size="sm",
+                            target="_blank",
+                        ),
+                    ],
+                    size="sm",
+                ),
+                html.P(
+                    (
+                        "Popularity momentum rows preserve peak bucket volume, first-to-latest share drift, "
+                        "latest-step share change, and interpretable momentum labels for each group."
+                    ),
+                    className="small text-muted mt-3 mb-2",
+                ),
+                dbc.ButtonGroup(
+                    [
+                        dbc.Button(
+                            "Momentum CSV",
+                            href=_group_temporal_export_href(
+                                meta,
+                                artifact="group_temporal_popularity_momentum",
+                                export_format="csv",
+                                group_type=group_type,
+                                group_key=group_key,
+                            ),
+                            color="primary",
+                            size="sm",
+                            target="_blank",
+                        ),
+                        dbc.Button(
+                            "Momentum JSON",
+                            href=_group_temporal_export_href(
+                                meta,
+                                artifact="group_temporal_popularity_momentum",
+                                export_format="json",
+                                group_type=group_type,
+                                group_key=group_key,
+                            ),
+                            color="outline-primary",
+                            size="sm",
+                            target="_blank",
+                        ),
+                    ],
+                    size="sm",
+                ),
+            ]
+        ),
+        className="shadow-sm",
+    )
+
+
 def _summary_cards(group_type: str, group_latent: dict) -> list:
     summary = group_latent.get("summary") if isinstance(group_latent.get("summary"), dict) else {}
     config = group_latent.get("config") if isinstance(group_latent.get("config"), dict) else {}
@@ -229,7 +421,7 @@ def _summary_cards(group_type: str, group_latent: dict) -> list:
 
 def _centroid_figure(rows: list[dict], selected_group_key: str | None, x_key: str, y_key: str, title: str) -> go.Figure:
     chart_rows = []
-    normalized_selected = str(selected_group_key or "").strip().lower()
+    normalized_selected = _normalize_group_lookup_key(selected_group_key)
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -269,21 +461,21 @@ def _centroid_figure(rows: list[dict], selected_group_key: str | None, x_key: st
                     "size": [max(10, min(28, int(row.get("n_articles") or 0) * 2)) for row in chart_rows],
                     "color": [
                         "#dc3545"
-                        if str(row.get("group_key") or "").strip().lower() == normalized_selected
+                        if _row_group_lookup_key(row) == normalized_selected
                         else STATUS_COLORS.get(str(row.get("status") or ""), STATUS_COLORS["unavailable"])
                         for row in chart_rows
                     ],
                     "opacity": [
-                        1.0 if str(row.get("group_key") or "").strip().lower() == normalized_selected else 0.78
+                        1.0 if _row_group_lookup_key(row) == normalized_selected else 0.78
                         for row in chart_rows
                     ],
                     "line": {
                         "color": [
-                            "#721c24" if str(row.get("group_key") or "").strip().lower() == normalized_selected else "#ffffff"
+                            "#721c24" if _row_group_lookup_key(row) == normalized_selected else "#ffffff"
                             for row in chart_rows
                         ],
                         "width": [
-                            2 if str(row.get("group_key") or "").strip().lower() == normalized_selected else 1
+                            2 if _row_group_lookup_key(row) == normalized_selected else 1
                             for row in chart_rows
                         ],
                     },
@@ -317,11 +509,40 @@ def _selected_group_summary(
         ("PCA Dispersion", _format_decimal(row.get("dispersion_pca"))),
         ("MDS Dispersion", _format_decimal(row.get("dispersion_mds"))),
     ]
+    popularity_comparison = None
+    share_drift_comparison = None
+    if all_group_rows and isinstance(temporal_payload, dict) and temporal_payload:
+        metrics.extend(
+            _selected_group_popularity_metrics(
+                row,
+                all_group_rows,
+                temporal_payload,
+                group_type,
+                selected_cluster_row,
+            )
+        )
+        popularity_comparison = _cluster_popularity_comparison(
+            all_group_rows,
+            row,
+            temporal_payload,
+            group_type,
+            bucket_granularity,
+            selected_cluster_row,
+        )
+        share_drift_comparison = _cluster_share_drift_comparison(
+            all_group_rows,
+            row,
+            temporal_payload,
+            group_type,
+            bucket_granularity,
+            selected_cluster_row,
+        )
     return dbc.Card(
         dbc.CardBody(
             [
                 html.H5(str(row.get("group") or "Selected Group"), className="card-title"),
                 _group_temporal_scope_summary(temporal_row, bucket_granularity, movement_basis, selected_cluster_row),
+                _movement_pattern_callout(temporal_row, movement_basis),
                 _cluster_peer_movement_callout(
                     all_group_rows or [],
                     row,
@@ -336,6 +557,16 @@ def _selected_group_summary(
                     bordered=False,
                     size="sm",
                     class_name="mb-0",
+                ),
+                html.Div(
+                    _group_popularity_timeline(temporal_row, bucket_granularity),
+                    className="mt-3",
+                ),
+                html.Div(popularity_comparison, className="mt-3") if popularity_comparison is not None else None,
+                html.Div(share_drift_comparison, className="mt-3") if share_drift_comparison is not None else None,
+                html.Div(
+                    _temporal_bucket_diagnostics_table(temporal_row, bucket_granularity, movement_basis),
+                    className="mt-3",
                 ),
             ]
         ),
@@ -661,12 +892,12 @@ def _group_table(rows: list[dict], selected_group_key: str | None, selected_clus
     if not rows:
         return dbc.Alert("No group rows are available for the selected group type.", color="warning", className="mb-0")
 
-    normalized_selected = str(selected_group_key or "").strip().lower()
+    normalized_selected = _normalize_group_lookup_key(selected_group_key)
     table_rows = []
     for row in rows[:15]:
         if not isinstance(row, dict):
             continue
-        selected = str(row.get("group_key") or "").strip().lower() == normalized_selected
+        selected = _row_group_lookup_key(row) == normalized_selected
         class_name = "table-primary" if selected else None
         table_rows.append(
             html.Tr(
@@ -721,12 +952,12 @@ def _selected_temporal_group_row(temporal_payload: dict, group_type: str, select
         return None
     groups = temporal_payload.get("groups") if isinstance(temporal_payload.get("groups"), dict) else {}
     rows = groups.get(group_type) if isinstance(groups.get(group_type), list) else []
-    normalized_selected = str(selected_group_key or "").strip().lower()
+    normalized_selected = _normalize_group_lookup_key(selected_group_key)
     if normalized_selected:
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            row_key = str(row.get("group_key") or row.get("group") or "").strip().lower()
+            row_key = _row_group_lookup_key(row)
             if row_key == normalized_selected:
                 return row
     for row in rows:
@@ -969,6 +1200,198 @@ def _group_movement_summary(
     )
 
 
+def _movement_leaderboard(
+    rows: list[dict],
+    temporal_payload: dict,
+    group_type: str,
+    movement_basis: str | None = "pca",
+    selected_group_key: str | None = None,
+    selected_cluster_row: dict | None = None,
+):
+    comparable_rows = [row for row in rows if isinstance(row, dict)]
+    if not comparable_rows:
+        return dbc.Alert("No comparable group movement rows are available for the current selection.", color="warning", className="mb-0")
+
+    groups = temporal_payload.get("groups") if isinstance(temporal_payload.get("groups"), dict) else {}
+    temporal_rows = groups.get(group_type) if isinstance(groups.get(group_type), list) else []
+    temporal_rows_by_key: dict[str, dict] = {}
+    for temporal_row in temporal_rows:
+        if not isinstance(temporal_row, dict):
+            continue
+        temporal_group_key = _row_group_lookup_key(temporal_row)
+        if temporal_group_key:
+            temporal_rows_by_key[temporal_group_key] = temporal_row
+
+    basis_config = _movement_basis_config(movement_basis)
+    total_movement_key = str(basis_config["total_movement_key"])
+    largest_jump_key = str(basis_config["largest_jump_key"])
+    valid_bucket_count_key = str(basis_config["valid_bucket_count_key"])
+    normalized_selected = _normalize_group_lookup_key(selected_group_key)
+    leaderboard_rows: list[dict[str, object]] = []
+
+    for row in comparable_rows:
+        group_key = _normalize_group_lookup_key(row.get("group_key") or row.get("group"))
+        if not group_key:
+            continue
+        temporal_row = temporal_rows_by_key.get(group_key)
+        path_summary = (
+            temporal_row.get("path_summary")
+            if isinstance(temporal_row, dict) and isinstance(temporal_row.get("path_summary"), dict)
+            else {}
+        )
+        total_movement = path_summary.get(total_movement_key)
+        if not isinstance(total_movement, (int, float)):
+            continue
+        leaderboard_rows.append(
+            {
+                "group": str(row.get("group") or "Unknown"),
+                "group_key": group_key,
+                "n_articles": int(row.get("n_articles") or 0),
+                "total_movement": float(total_movement),
+                "largest_jump": (
+                    float(path_summary.get(largest_jump_key))
+                    if isinstance(path_summary.get(largest_jump_key), (int, float))
+                    else None
+                ),
+                "valid_bucket_count": int(path_summary.get(valid_bucket_count_key) or 0),
+                "coverage_gap_count": int(path_summary.get("coverage_gap_count") or 0),
+            }
+        )
+
+    if not leaderboard_rows:
+        return dbc.Alert(
+            "No comparable total-movement values are available for the current selection.",
+            color="warning",
+            className="mb-0",
+        )
+
+    leaderboard_rows.sort(
+        key=lambda item: (
+            -float(item["total_movement"]),
+            -float(item["largest_jump"] or 0.0),
+            str(item["group"]).lower(),
+        )
+    )
+    basis_label = str(basis_config["basis"]).upper()
+    scope_label = (
+        str(selected_cluster_row.get("label") or selected_cluster_row.get("cluster_id") or "Selected cluster")
+        if isinstance(selected_cluster_row, dict)
+        else "All groups"
+    )
+    summary = (
+        f"Ranks the current {group_type} groups by {basis_label} total movement within {scope_label}. "
+        f"Showing {min(len(leaderboard_rows), 8)} of {len(leaderboard_rows)} comparable groups."
+    )
+    table_rows = []
+    for index, leaderboard_row in enumerate(leaderboard_rows[:8], start=1):
+        class_name = "table-primary" if str(leaderboard_row["group_key"]) == normalized_selected else None
+        table_rows.append(
+            html.Tr(
+                [
+                    html.Td(str(index)),
+                    html.Td(str(leaderboard_row["group"])),
+                    html.Td(str(int(leaderboard_row["n_articles"]))),
+                    html.Td(_format_decimal(leaderboard_row["total_movement"])),
+                    html.Td(_format_decimal(leaderboard_row["largest_jump"])),
+                    html.Td(str(int(leaderboard_row["valid_bucket_count"]))),
+                    html.Td(str(int(leaderboard_row["coverage_gap_count"]))),
+                ],
+                className=class_name,
+            )
+        )
+
+    return dbc.Card(
+        dbc.CardBody(
+            [
+                html.H5(f"Movement Leaderboard ({basis_label})", className="card-title"),
+                html.P(summary, className="text-muted mb-3"),
+                dbc.Table(
+                    [
+                        html.Thead(
+                            html.Tr(
+                                [
+                                    html.Th("Rank"),
+                                    html.Th("Group"),
+                                    html.Th("Articles"),
+                                    html.Th("Total"),
+                                    html.Th("Largest Jump"),
+                                    html.Th("Valid Buckets"),
+                                    html.Th("Gap Count"),
+                                ]
+                            )
+                        ),
+                        html.Tbody(table_rows),
+                    ],
+                    bordered=True,
+                    striped=True,
+                    hover=True,
+                    responsive=True,
+                    size="sm",
+                    class_name="mb-0",
+                ),
+            ]
+        ),
+        className="shadow-sm",
+    )
+
+
+def _movement_pattern_callout(
+    temporal_row: dict | None,
+    movement_basis: str | None = "pca",
+):
+    if not isinstance(temporal_row, dict):
+        return None
+
+    basis_config = _movement_basis_config(movement_basis)
+    path_summary = temporal_row.get("path_summary") if isinstance(temporal_row.get("path_summary"), dict) else {}
+    total_movement = path_summary.get(str(basis_config["total_movement_key"]))
+    largest_jump = path_summary.get(str(basis_config["largest_jump_key"]))
+    valid_bucket_count = int(path_summary.get(str(basis_config["valid_bucket_count_key"])) or 0)
+    if not isinstance(total_movement, (int, float)) or not isinstance(largest_jump, (int, float)):
+        return None
+
+    basis_label = str(basis_config["basis"]).upper()
+    direction_text = _format_direction_summary(path_summary.get(str(basis_config["direction_key"])), basis_config["direction_dimensions"])
+    bucket_suffix = "" if valid_bucket_count == 1 else "s"
+    if total_movement <= 0:
+        message = (
+            f"Movement pattern: no measurable {basis_label} movement across "
+            f"{valid_bucket_count} valid bucket{bucket_suffix}."
+        )
+        return dbc.Alert(message, color="light", className="py-2 mb-3")
+
+    jump_share = min(max(float(largest_jump) / float(total_movement), 0.0), 1.0)
+    if jump_share >= 0.75:
+        label = "jump-led"
+        color = "warning"
+        explanation = (
+            f"Largest jump contributes {_format_percent(jump_share)} of total {basis_label} movement, "
+            "so the path is dominated by one sharp shift."
+        )
+    elif valid_bucket_count >= 3 and jump_share <= 0.6:
+        label = "steady drift"
+        color = "info"
+        explanation = (
+            f"Largest jump contributes {_format_percent(jump_share)} of total {basis_label} movement, "
+            "so movement is spread across multiple buckets."
+        )
+    else:
+        label = "mixed"
+        color = "light"
+        explanation = (
+            f"Largest jump contributes {_format_percent(jump_share)} of total {basis_label} movement, "
+            "so the path blends gradual drift with one notable step."
+        )
+
+    message = (
+        f"Movement pattern: {label}. {explanation} "
+        f"{valid_bucket_count} valid bucket{bucket_suffix} contribute to this summary."
+    )
+    if direction_text != "n/a":
+        message += f" Net direction: {direction_text}."
+    return dbc.Alert(message, color=color, className="py-2 mb-3")
+
+
 def _group_temporal_scope_summary(
     temporal_row: dict | None,
     bucket_granularity: str = "week",
@@ -1009,6 +1432,878 @@ def _group_temporal_scope_summary(
     return dbc.Alert(summary, color="light", className="mb-2 py-2")
 
 
+def _source_count_summary(source_counts: object, limit: int = 2) -> str:
+    if not isinstance(source_counts, dict) or not source_counts:
+        return "n/a"
+    items = []
+    for source, count in list(source_counts.items())[:limit]:
+        items.append(f"{str(source)} ({int(count or 0)})")
+    return ", ".join(items) if items else "n/a"
+
+
+def _lens_deviation_summary(lens_rows: object, limit: int = 2) -> str:
+    if not isinstance(lens_rows, list) or not lens_rows:
+        return "n/a"
+    parts = []
+    for lens_row in lens_rows[:limit]:
+        if not isinstance(lens_row, dict):
+            continue
+        lens_label = str(lens_row.get("lens") or "").strip()
+        if not lens_label:
+            continue
+        parts.append(f"{lens_label} ({_format_decimal(lens_row.get('delta'), 1)})")
+    return ", ".join(parts) if parts else "n/a"
+
+
+def _bucket_coordinate_summary(bucket_row: dict, movement_basis: str | None = "pca") -> str:
+    basis_config = _movement_basis_config(movement_basis)
+    x_key = str(basis_config["x_key"])
+    y_key = str(basis_config["y_key"])
+    x_label = str(basis_config["x_label"])
+    y_label = str(basis_config["y_label"])
+    x_value = bucket_row.get(x_key)
+    y_value = bucket_row.get(y_key)
+    if not isinstance(x_value, (int, float)) or not isinstance(y_value, (int, float)):
+        return "n/a"
+    return f"{x_label} {_format_decimal(x_value, 2)}, {y_label} {_format_decimal(y_value, 2)}"
+
+
+def _group_popularity_timeline(
+    temporal_row: dict | None,
+    bucket_granularity: str = "week",
+):
+    if not isinstance(temporal_row, dict):
+        return dbc.Alert(
+            "No popularity timeline is available for the current selection.",
+            color="warning",
+            className="mb-0",
+        )
+
+    bucket_rows = temporal_row.get("buckets") if isinstance(temporal_row.get("buckets"), list) else []
+    plotted_rows = []
+    for bucket_row in bucket_rows:
+        if not isinstance(bucket_row, dict):
+            continue
+        bucket_label = str(bucket_row.get("bucket_label") or bucket_row.get("bucket_start") or "").strip()
+        if not bucket_label:
+            continue
+        n_articles = bucket_row.get("n_articles")
+        corpus_share = bucket_row.get("corpus_share")
+        if not isinstance(n_articles, (int, float)) and not isinstance(corpus_share, (int, float)):
+            continue
+        plotted_rows.append(
+            {
+                "label": bucket_label,
+                "articles": int(n_articles or 0),
+                "corpus_share": float(corpus_share) if isinstance(corpus_share, (int, float)) else None,
+                "status": str(bucket_row.get("status") or "n/a"),
+            }
+        )
+
+    if not plotted_rows:
+        return dbc.Alert(
+            "No popularity timeline is available for the current selection.",
+            color="warning",
+            className="mb-0",
+        )
+
+    first_share = next((row["corpus_share"] for row in plotted_rows if isinstance(row["corpus_share"], float)), None)
+    latest_share = next(
+        (row["corpus_share"] for row in reversed(plotted_rows) if isinstance(row["corpus_share"], float)),
+        None,
+    )
+    peak_articles_row = max(plotted_rows, key=lambda row: row["articles"])
+
+    trend_note = (
+        f"Peak volume lands in {peak_articles_row['label']} with {peak_articles_row['articles']} article"
+        f"{'' if peak_articles_row['articles'] == 1 else 's'}."
+    )
+    if isinstance(first_share, float) and isinstance(latest_share, float):
+        share_delta = latest_share - first_share
+        if abs(share_delta) < 0.0005:
+            trend_note += f" Latest corpus share holds flat at {_format_percent(latest_share)} versus the first bucket."
+        elif share_delta > 0:
+            trend_note += (
+                f" Latest corpus share rises to {_format_percent(latest_share)} "
+                f"({share_delta * 100:.1f} pts above the first bucket)."
+            )
+        else:
+            trend_note += (
+                f" Latest corpus share eases to {_format_percent(latest_share)} "
+                f"({abs(share_delta) * 100:.1f} pts below the first bucket)."
+            )
+
+    granularity_label = str(bucket_granularity or "week").strip().title() or "Week"
+    figure = go.Figure()
+    figure.add_trace(
+        go.Bar(
+            x=[row["label"] for row in plotted_rows],
+            y=[row["articles"] for row in plotted_rows],
+            name="Articles",
+            marker={
+                "color": [
+                    "#ffc107" if row["status"] != "ok" else "#0d6efd"
+                    for row in plotted_rows
+                ]
+            },
+            customdata=[
+                [row["corpus_share"], row["status"]]
+                for row in plotted_rows
+            ],
+            hovertemplate=(
+                "Bucket: %{x}<br>Articles: %{y}<br>Corpus share: %{customdata[0]:.1%}"
+                "<br>Status: %{customdata[1]}<extra></extra>"
+            ),
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=[row["label"] for row in plotted_rows],
+            y=[row["corpus_share"] for row in plotted_rows],
+            mode="lines+markers",
+            name="Corpus Share",
+            line={"color": "#198754", "width": 2},
+            marker={"size": 9},
+            yaxis="y2",
+            hovertemplate="Bucket: %{x}<br>Corpus share: %{y:.1%}<extra></extra>",
+        )
+    )
+    figure.update_layout(
+        title=f"{granularity_label} Popularity Timeline",
+        template="plotly_white",
+        margin={"l": 30, "r": 30, "t": 60, "b": 40},
+        xaxis_title=granularity_label,
+        yaxis_title="Articles",
+        yaxis2={
+            "title": "Corpus Share",
+            "overlaying": "y",
+            "side": "right",
+            "tickformat": ".0%",
+            "rangemode": "tozero",
+        },
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1.0},
+    )
+
+    return html.Div(
+        [
+            html.H6("Popularity Timeline", className="mt-0 mb-2"),
+            html.P(
+                f"{granularity_label} bucket counts and corpus share for the selected group. {trend_note}",
+                className="text-muted mb-2",
+            ),
+            dcc.Graph(figure=figure, config={"displayModeBar": False}, style={"height": "280px"}),
+        ]
+    )
+
+
+def _cluster_popularity_comparison(
+    all_group_rows: list[dict],
+    selected_row: dict | None,
+    temporal_payload: dict,
+    group_type: str,
+    bucket_granularity: str = "week",
+    selected_cluster_row: dict | None = None,
+):
+    if not isinstance(selected_row, dict):
+        return dbc.Alert(
+            "No popularity comparison is available for the current selection.",
+            color="warning",
+            className="mb-0",
+        )
+
+    selected_cluster_value = (
+        str(selected_cluster_row.get("cluster_id"))
+        if isinstance(selected_cluster_row, dict)
+        else ALL_GROUPS_CLUSTER_VALUE
+    )
+    scoped_rows = _group_rows_for_cluster(all_group_rows, selected_cluster_value)
+    if not scoped_rows:
+        return dbc.Alert(
+            "No popularity comparison rows are available for the current selection.",
+            color="warning",
+            className="mb-0",
+        )
+
+    popularity_rows = _cluster_popularity_rows(
+        scoped_rows,
+        temporal_payload,
+        group_type,
+    )
+    if not popularity_rows:
+        return dbc.Alert(
+            "No popularity comparison rows are available for the current selection.",
+            color="warning",
+            className="mb-0",
+        )
+
+    selected_group_key = _normalize_group_lookup_key(selected_row.get("group_key") or selected_row.get("group"))
+    first_rank_rows = _rank_share_position_rows(
+        popularity_rows,
+        value_field="first_share",
+        rank_field="first_share_rank",
+    )
+    popularity_rows = _rank_share_position_rows(
+        popularity_rows,
+        value_field="latest_share",
+        rank_field="latest_share_rank",
+    )
+    first_rank_by_key = {
+        _row_group_lookup_key(popularity_row): popularity_row.get("first_share_rank")
+        for popularity_row in first_rank_rows
+    }
+
+    granularity_label = str(bucket_granularity or "week").strip().title() or "Week"
+    scope_label = (
+        str(selected_cluster_row.get("label") or selected_cluster_row.get("cluster_id") or "Selected cluster")
+        if isinstance(selected_cluster_row, dict)
+        else "All groups"
+    )
+    summary = (
+        f"Compares starting-to-latest {granularity_label.lower()} corpus-share rank, latest share, "
+        f"and peak bucket volume within {scope_label}. "
+        f"Showing {min(len(popularity_rows), 6)} of {len(popularity_rows)} groups with bucket rows."
+    )
+
+    table_rows = []
+    for index, popularity_row in enumerate(popularity_rows[:6], start=1):
+        group_key = _row_group_lookup_key(popularity_row)
+        class_name = "table-primary" if group_key == selected_group_key else None
+        first_rank = first_rank_by_key.get(group_key)
+        latest_rank = popularity_row.get("latest_share_rank")
+        table_rows.append(
+            html.Tr(
+                [
+                    html.Td(str(int(latest_rank) if isinstance(latest_rank, int) else index)),
+                    html.Td(str(popularity_row["group"])),
+                    html.Td(str(int(popularity_row["n_articles"]))),
+                    html.Td(str(popularity_row["peak_bucket"])),
+                    html.Td(str(int(popularity_row["peak_articles"]))),
+                    html.Td(_format_percent(popularity_row["first_share"])),
+                    html.Td(_format_percent(popularity_row["latest_share"])),
+                    html.Td(_rank_trajectory_compact_label(first_rank, latest_rank)),
+                    html.Td(_share_delta_label(popularity_row["share_delta"])),
+                ],
+                className=class_name,
+            )
+        )
+
+    return html.Div(
+        [
+            html.H6("Popularity Comparison", className="mt-0 mb-2"),
+            html.P(summary, className="text-muted mb-2"),
+            dbc.Table(
+                [
+                    html.Thead(
+                        html.Tr(
+                            [
+                                html.Th("Latest Rank"),
+                                html.Th("Group"),
+                                html.Th("Articles"),
+                                html.Th("Peak Bucket"),
+                                html.Th("Peak Articles"),
+                                html.Th("First Share"),
+                                html.Th("Latest Share"),
+                                html.Th("Rank Trajectory"),
+                                html.Th("Share Drift"),
+                            ]
+                        )
+                    ),
+                    html.Tbody(table_rows),
+                ],
+                bordered=True,
+                striped=True,
+                hover=True,
+                responsive=True,
+                size="sm",
+                class_name="mb-0",
+            ),
+        ]
+    )
+
+
+def _cluster_popularity_rows(
+    scoped_rows: list[dict],
+    temporal_payload: dict,
+    group_type: str,
+) -> list[dict[str, object]]:
+    groups = temporal_payload.get("groups") if isinstance(temporal_payload.get("groups"), dict) else {}
+    temporal_rows = groups.get(group_type) if isinstance(groups.get(group_type), list) else []
+    temporal_rows_by_key: dict[str, dict] = {}
+    for temporal_row in temporal_rows:
+        if not isinstance(temporal_row, dict):
+            continue
+        temporal_group_key = _normalize_group_lookup_key(temporal_row.get("group_key") or temporal_row.get("group"))
+        if temporal_group_key:
+            temporal_rows_by_key[temporal_group_key] = temporal_row
+
+    popularity_rows: list[dict[str, object]] = []
+    for group_row in scoped_rows:
+        if not isinstance(group_row, dict):
+            continue
+        group_key = _row_group_lookup_key(group_row)
+        if not group_key:
+            continue
+        temporal_row = temporal_rows_by_key.get(group_key)
+        popularity_summary = (
+            temporal_row.get("popularity_summary")
+            if isinstance(temporal_row, dict) and isinstance(temporal_row.get("popularity_summary"), dict)
+            else {}
+        )
+        if popularity_summary:
+            share_delta = popularity_summary.get("share_delta")
+            recent_share_delta = popularity_summary.get("recent_share_delta")
+            popularity_rows.append(
+                {
+                    "group": str(group_row.get("group") or temporal_row.get("group") or "Unknown"),
+                    "group_key": group_key,
+                    "n_articles": int(group_row.get("n_articles") or temporal_row.get("n_articles") or 0),
+                    "peak_bucket": popularity_summary.get("peak_bucket"),
+                    "peak_articles": int(popularity_summary.get("peak_articles") or 0),
+                    "first_share": popularity_summary.get("first_share"),
+                    "latest_share": popularity_summary.get("latest_share"),
+                    "share_delta": share_delta,
+                    "recent_share_delta": recent_share_delta,
+                    "share_direction": popularity_summary.get("share_direction") or _share_delta_direction(share_delta),
+                    "recent_share_direction": popularity_summary.get("recent_share_direction")
+                    or _share_delta_direction(recent_share_delta),
+                    "momentum_label": popularity_summary.get("momentum_label")
+                    or _popularity_momentum_label(share_delta, recent_share_delta),
+                }
+            )
+            continue
+        bucket_rows = temporal_row.get("buckets") if isinstance(temporal_row, dict) and isinstance(temporal_row.get("buckets"), list) else []
+        plotted_rows = []
+        for bucket_row in bucket_rows:
+            if not isinstance(bucket_row, dict):
+                continue
+            bucket_label = str(bucket_row.get("bucket_label") or bucket_row.get("bucket_start") or "").strip()
+            n_articles = bucket_row.get("n_articles")
+            corpus_share = bucket_row.get("corpus_share")
+            if not bucket_label or (not isinstance(n_articles, (int, float)) and not isinstance(corpus_share, (int, float))):
+                continue
+            plotted_rows.append(
+                {
+                    "label": bucket_label,
+                    "articles": int(n_articles or 0),
+                    "corpus_share": float(corpus_share) if isinstance(corpus_share, (int, float)) else None,
+                }
+            )
+        if not plotted_rows:
+            continue
+
+        peak_articles_row = max(plotted_rows, key=lambda row: int(row["articles"]))
+        first_share = next((row["corpus_share"] for row in plotted_rows if isinstance(row["corpus_share"], float)), None)
+        latest_share = next(
+            (row["corpus_share"] for row in reversed(plotted_rows) if isinstance(row["corpus_share"], float)),
+            None,
+        )
+        previous_share = next(
+            (row["corpus_share"] for row in reversed(plotted_rows[:-1]) if isinstance(row["corpus_share"], float)),
+            None,
+        )
+        share_delta = (
+            float(latest_share) - float(first_share)
+            if isinstance(first_share, float) and isinstance(latest_share, float)
+            else None
+        )
+        recent_share_delta = (
+            float(latest_share) - float(previous_share)
+            if isinstance(previous_share, float) and isinstance(latest_share, float)
+            else None
+        )
+        popularity_rows.append(
+            {
+                "group": str(group_row.get("group") or "Unknown"),
+                "group_key": group_key,
+                "n_articles": int(group_row.get("n_articles") or 0),
+                "peak_bucket": str(peak_articles_row["label"]),
+                "peak_articles": int(peak_articles_row["articles"]),
+                "first_share": first_share,
+                "latest_share": latest_share,
+                "share_delta": share_delta,
+                "recent_share_delta": recent_share_delta,
+                "share_direction": _share_delta_direction(share_delta),
+                "recent_share_direction": _share_delta_direction(recent_share_delta),
+                "momentum_label": _popularity_momentum_label(share_delta, recent_share_delta),
+            }
+        )
+
+    return popularity_rows
+
+
+def _share_delta_direction(value: object) -> str | None:
+    if not isinstance(value, (int, float)):
+        return None
+    if abs(float(value)) < 0.0005:
+        return "flat"
+    return "rising" if float(value) > 0 else "falling"
+
+
+def _popularity_momentum_label(share_delta: object, recent_share_delta: object) -> str | None:
+    overall_direction = _share_delta_direction(share_delta)
+    recent_direction = _share_delta_direction(recent_share_delta)
+
+    if overall_direction == "rising":
+        if recent_direction == "rising":
+            return "rising now"
+        if recent_direction == "falling":
+            return "cooling after gains"
+        return "holding gains"
+    if overall_direction == "falling":
+        if recent_direction == "rising":
+            return "rebounding"
+        if recent_direction == "falling":
+            return "still falling"
+        return "holding losses"
+    if overall_direction == "flat":
+        if recent_direction == "rising":
+            return "rebounding to baseline"
+        if recent_direction == "falling":
+            return "slipping from baseline"
+        return "flat"
+    if recent_direction == "rising":
+        return "recently rising"
+    if recent_direction == "falling":
+        return "recently falling"
+    return recent_direction
+
+
+def _share_delta_label(value: object) -> str:
+    if not isinstance(value, (int, float)):
+        return "n/a"
+    if abs(float(value)) < 0.0005:
+        return "Flat"
+    return f"{float(value) * 100:+.1f} pts"
+
+
+def _recent_step_summary(direction: object, recent_share_delta: object) -> str:
+    normalized_direction = str(direction or "").strip().lower()
+    delta_label = _share_delta_label(recent_share_delta)
+    if normalized_direction in {"rising", "falling", "flat"}:
+        if delta_label == "n/a":
+            return normalized_direction
+        return f"{normalized_direction} ({delta_label})"
+    return delta_label
+
+
+def _rank_share_drift_rows(popularity_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    ranked_rows = [dict(row) for row in popularity_rows if isinstance(row, dict)]
+    ranked_rows.sort(
+        key=lambda row: (
+            -(float(row["share_delta"]) if isinstance(row["share_delta"], float) else -999.0),
+            -(float(row["recent_share_delta"]) if isinstance(row["recent_share_delta"], float) else -999.0),
+            -(float(row["latest_share"]) if isinstance(row["latest_share"], float) else -1.0),
+            str(row["group"]).lower(),
+        )
+    )
+    for index, popularity_row in enumerate(ranked_rows, start=1):
+        popularity_row["share_drift_rank"] = index
+    return ranked_rows
+
+
+def _rank_share_position_rows(
+    popularity_rows: list[dict[str, object]],
+    *,
+    value_field: str,
+    rank_field: str,
+) -> list[dict[str, object]]:
+    ranked_rows = [dict(row) for row in popularity_rows if isinstance(row, dict)]
+    ranked_rows.sort(
+        key=lambda row: (
+            -(float(row[value_field]) if isinstance(row.get(value_field), (int, float)) else -999.0),
+            -(float(row["recent_share_delta"]) if isinstance(row.get("recent_share_delta"), (int, float)) else -999.0),
+            -(int(row["peak_articles"]) if isinstance(row.get("peak_articles"), (int, float)) else -1),
+            str(row.get("group") or "").lower(),
+        )
+    )
+    for index, popularity_row in enumerate(ranked_rows, start=1):
+        popularity_row[rank_field] = index
+    return ranked_rows
+
+
+def _rank_trajectory_summary(first_rank: object, latest_rank: object, scope_label: str) -> str:
+    if not isinstance(first_rank, int) or not isinstance(latest_rank, int):
+        return "n/a"
+    if latest_rank < first_rank:
+        return f"{first_rank} -> {latest_rank} in {scope_label} (up {first_rank - latest_rank})"
+    if latest_rank > first_rank:
+        return f"{first_rank} -> {latest_rank} in {scope_label} (down {latest_rank - first_rank})"
+    return f"{first_rank} -> {latest_rank} in {scope_label} (held)"
+
+
+def _rank_trajectory_compact_label(first_rank: object, latest_rank: object) -> str:
+    if not isinstance(first_rank, int) or not isinstance(latest_rank, int):
+        return "n/a"
+    if latest_rank < first_rank:
+        return f"{first_rank} -> {latest_rank} (up {first_rank - latest_rank})"
+    if latest_rank > first_rank:
+        return f"{first_rank} -> {latest_rank} (down {latest_rank - first_rank})"
+    return f"{first_rank} -> {latest_rank} (held)"
+
+
+def _selected_group_popularity_metrics(
+    row: dict,
+    all_group_rows: list[dict],
+    temporal_payload: dict,
+    group_type: str,
+    selected_cluster_row: dict | None = None,
+) -> list[tuple[str, str]]:
+    selected_cluster_value = (
+        str(selected_cluster_row.get("cluster_id"))
+        if isinstance(selected_cluster_row, dict)
+        else ALL_GROUPS_CLUSTER_VALUE
+    )
+    scoped_rows = _group_rows_for_cluster(all_group_rows, selected_cluster_value)
+    popularity_rows = _rank_share_drift_rows(_cluster_popularity_rows(scoped_rows, temporal_payload, group_type))
+    if not popularity_rows:
+        return []
+
+    first_rank_rows = _rank_share_position_rows(
+        popularity_rows,
+        value_field="first_share",
+        rank_field="first_share_rank",
+    )
+    latest_rank_rows = _rank_share_position_rows(
+        popularity_rows,
+        value_field="latest_share",
+        rank_field="latest_share_rank",
+    )
+    first_rank_by_key = {
+        _row_group_lookup_key(popularity_row): popularity_row.get("first_share_rank")
+        for popularity_row in first_rank_rows
+    }
+    latest_rank_by_key = {
+        _row_group_lookup_key(popularity_row): popularity_row.get("latest_share_rank")
+        for popularity_row in latest_rank_rows
+    }
+
+    selected_group_key = _normalize_group_lookup_key(row.get("group_key") or row.get("group"))
+    scope_label = (
+        str(selected_cluster_row.get("label") or selected_cluster_row.get("cluster_id") or "Selected cluster")
+        if isinstance(selected_cluster_row, dict)
+        else "All groups"
+    )
+    for popularity_row in popularity_rows:
+        if _row_group_lookup_key(popularity_row) != selected_group_key:
+            continue
+
+        return [
+            ("Popularity Momentum", str(popularity_row.get("momentum_label") or "n/a")),
+            (
+                "Share Drift Rank",
+                f"{int(popularity_row.get('share_drift_rank') or 0)} of {len(popularity_rows)} in {scope_label}",
+            ),
+            (
+                "Rank Trajectory",
+                _rank_trajectory_summary(
+                    first_rank_by_key.get(selected_group_key),
+                    latest_rank_by_key.get(selected_group_key),
+                    scope_label,
+                ),
+            ),
+            (
+                "Recent Step",
+                _recent_step_summary(
+                    popularity_row.get("recent_share_direction"),
+                    popularity_row.get("recent_share_delta"),
+                ),
+            ),
+        ]
+    return []
+
+
+def _share_delta_metric(value: object, max_abs_value: object) -> html.Div:
+    label = _share_delta_label(value)
+    if not isinstance(value, (int, float)):
+        return html.Div(label, className="share-drift-metric text-muted")
+
+    numeric_value = float(value)
+    abs_value = abs(numeric_value)
+    scale_max = float(max_abs_value) if isinstance(max_abs_value, (int, float)) and float(max_abs_value) > 0 else abs_value
+    relative_width = min(abs_value / scale_max, 1.0) if scale_max > 0 else 0.0
+
+    if abs_value < 0.0005:
+        label_class = "share-drift-label text-muted"
+        fill_style = {
+            "left": "calc(50% - 3px)",
+            "width": "6px",
+            "backgroundColor": "#6c757d",
+        }
+    elif numeric_value > 0:
+        label_class = "share-drift-label text-success"
+        fill_style = {
+            "left": "50%",
+            "width": f"{relative_width * 50:.1f}%",
+            "backgroundColor": "#198754",
+        }
+    else:
+        label_class = "share-drift-label text-danger"
+        fill_style = {
+            "left": f"{50 - (relative_width * 50):.1f}%",
+            "width": f"{relative_width * 50:.1f}%",
+            "backgroundColor": "#dc3545",
+        }
+
+    return html.Div(
+        [
+            html.Div(label, className=label_class),
+            html.Div(
+                [
+                    html.Div(
+                        className="share-drift-mini-bar-midline",
+                        style={
+                            "position": "absolute",
+                            "left": "50%",
+                            "top": "2px",
+                            "bottom": "2px",
+                            "width": "1px",
+                            "backgroundColor": "#adb5bd",
+                        },
+                    ),
+                    html.Div(
+                        className="share-drift-mini-bar-fill",
+                        style={
+                            "position": "absolute",
+                            "top": "6px",
+                            "height": "8px",
+                            "borderRadius": "999px",
+                            **fill_style,
+                        },
+                    ),
+                ],
+                className="share-drift-mini-bar",
+                title="Scaled within the visible rows for this column.",
+                style={
+                    "position": "relative",
+                    "width": "72px",
+                    "height": "20px",
+                    "borderRadius": "999px",
+                    "backgroundColor": "#f8f9fa",
+                    "overflow": "hidden",
+                },
+            ),
+        ],
+        className="share-drift-metric",
+    )
+
+
+def _cluster_share_drift_comparison(
+    all_group_rows: list[dict],
+    selected_row: dict | None,
+    temporal_payload: dict,
+    group_type: str,
+    bucket_granularity: str = "week",
+    selected_cluster_row: dict | None = None,
+):
+    if not isinstance(selected_row, dict):
+        return dbc.Alert(
+            "No share-drift comparison is available for the current selection.",
+            color="warning",
+            className="mb-0",
+        )
+
+    selected_cluster_value = (
+        str(selected_cluster_row.get("cluster_id"))
+        if isinstance(selected_cluster_row, dict)
+        else ALL_GROUPS_CLUSTER_VALUE
+    )
+    scoped_rows = _group_rows_for_cluster(all_group_rows, selected_cluster_value)
+    if not scoped_rows:
+        return dbc.Alert(
+            "No share-drift comparison rows are available for the current selection.",
+            color="warning",
+            className="mb-0",
+        )
+
+    popularity_rows = _cluster_popularity_rows(scoped_rows, temporal_payload, group_type)
+    if not popularity_rows:
+        return dbc.Alert(
+            "No share-drift comparison rows are available for the current selection.",
+            color="warning",
+            className="mb-0",
+        )
+
+    selected_group_key = _normalize_group_lookup_key(selected_row.get("group_key") or selected_row.get("group"))
+    popularity_rows = _rank_share_drift_rows(popularity_rows)
+    first_rank_rows = _rank_share_position_rows(
+        popularity_rows,
+        value_field="first_share",
+        rank_field="first_share_rank",
+    )
+    latest_rank_rows = _rank_share_position_rows(
+        popularity_rows,
+        value_field="latest_share",
+        rank_field="latest_share_rank",
+    )
+    first_rank_by_key = {
+        _row_group_lookup_key(popularity_row): popularity_row.get("first_share_rank")
+        for popularity_row in first_rank_rows
+    }
+    latest_rank_by_key = {
+        _row_group_lookup_key(popularity_row): popularity_row.get("latest_share_rank")
+        for popularity_row in latest_rank_rows
+    }
+
+    granularity_label = str(bucket_granularity or "week").strip().title() or "Week"
+    scope_label = (
+        str(selected_cluster_row.get("label") or selected_cluster_row.get("cluster_id") or "Selected cluster")
+        if isinstance(selected_cluster_row, dict)
+        else "All groups"
+    )
+    summary = (
+        f"Ranks first-to-latest {granularity_label.lower()} corpus-share change within {scope_label} "
+        f"and shows the latest {granularity_label.lower()} step. "
+        f"Showing {min(len(popularity_rows), 6)} of {len(popularity_rows)} groups with bucket rows."
+    )
+    visible_rows = popularity_rows[:6]
+    drift_scale_max = max(
+        (abs(float(row["share_delta"])) for row in visible_rows if isinstance(row.get("share_delta"), float)),
+        default=0.0,
+    )
+    recent_scale_max = max(
+        (abs(float(row["recent_share_delta"])) for row in visible_rows if isinstance(row.get("recent_share_delta"), float)),
+        default=0.0,
+    )
+
+    table_rows = []
+    for index, popularity_row in enumerate(visible_rows, start=1):
+        group_key = _row_group_lookup_key(popularity_row)
+        class_name = "table-primary" if group_key == selected_group_key else None
+        table_rows.append(
+            html.Tr(
+                [
+                    html.Td(str(index)),
+                    html.Td(str(popularity_row["group"])),
+                    html.Td(_format_percent(popularity_row["first_share"])),
+                    html.Td(_format_percent(popularity_row["latest_share"])),
+                    html.Td(
+                        _rank_trajectory_compact_label(
+                            first_rank_by_key.get(group_key),
+                            latest_rank_by_key.get(group_key),
+                        )
+                    ),
+                    html.Td(_share_delta_metric(popularity_row["share_delta"], drift_scale_max)),
+                    html.Td(_share_delta_metric(popularity_row["recent_share_delta"], recent_scale_max)),
+                    html.Td(str(int(popularity_row["peak_articles"]))),
+                    html.Td(str(popularity_row["peak_bucket"])),
+                ],
+                className=class_name,
+            )
+        )
+
+    return html.Div(
+        [
+            html.H6("Share Drift Comparison", className="mt-0 mb-2"),
+            html.P(summary, className="text-muted mb-2"),
+            html.P("Mini-bars scale relative magnitude within the visible rows for each column.", className="text-muted small mb-2"),
+            dbc.Table(
+                [
+                    html.Thead(
+                        html.Tr(
+                            [
+                                html.Th("Rank"),
+                                html.Th("Group"),
+                                html.Th("First Share"),
+                                html.Th("Latest Share"),
+                                html.Th("Rank Trajectory"),
+                                html.Th("Drift"),
+                                html.Th("Recent Step"),
+                                html.Th("Peak Articles"),
+                                html.Th("Peak Bucket"),
+                            ]
+                        )
+                    ),
+                    html.Tbody(table_rows),
+                ],
+                bordered=True,
+                striped=True,
+                hover=True,
+                responsive=True,
+                size="sm",
+                class_name="mb-0",
+            ),
+        ]
+    )
+
+
+def _temporal_bucket_diagnostics_table(
+    temporal_row: dict | None,
+    bucket_granularity: str = "week",
+    movement_basis: str | None = "pca",
+):
+    if not isinstance(temporal_row, dict):
+        return dbc.Alert(
+            "No bucket-level diagnostics are available for the current selection.",
+            color="warning",
+            className="mb-0",
+        )
+
+    bucket_rows = temporal_row.get("buckets") if isinstance(temporal_row.get("buckets"), list) else []
+    if not bucket_rows:
+        return dbc.Alert(
+            "No bucket-level diagnostics are available for the current selection.",
+            color="warning",
+            className="mb-0",
+        )
+
+    granularity_label = str(bucket_granularity or "week").strip().title() or "Week"
+    basis_label = str(_movement_basis_config(movement_basis)["basis"]).upper()
+    table_rows = []
+    for bucket_row in bucket_rows[:8]:
+        if not isinstance(bucket_row, dict):
+            continue
+        bucket_label = str(bucket_row.get("bucket_label") or bucket_row.get("bucket_start") or "Unknown")
+        table_rows.append(
+            html.Tr(
+                [
+                    html.Td(bucket_label),
+                    html.Td(str(bucket_row.get("status") or "n/a")),
+                    html.Td(str(int(bucket_row.get("n_articles") or 0))),
+                    html.Td(str(int(bucket_row.get("n_sources") or 0))),
+                    html.Td(_format_percent(bucket_row.get("corpus_share"))),
+                    html.Td(_bucket_coordinate_summary(bucket_row, movement_basis)),
+                    html.Td(_source_count_summary(bucket_row.get("source_counts"))),
+                    html.Td(_lens_deviation_summary(bucket_row.get("top_lens_deviations"))),
+                ]
+            )
+        )
+
+    return html.Div(
+        [
+            html.H6("Temporal Bucket Diagnostics", className="mt-0 mb-2"),
+            html.P(
+                f"{granularity_label} buckets for the selected group. Coordinates follow the {basis_label} movement basis.",
+                className="text-muted mb-2",
+            ),
+            dbc.Table(
+                [
+                    html.Thead(
+                        html.Tr(
+                            [
+                                html.Th("Bucket"),
+                                html.Th("Status"),
+                                html.Th("Articles"),
+                                html.Th("Sources"),
+                                html.Th("Corpus Share"),
+                                html.Th("Coordinates"),
+                                html.Th("Top Sources"),
+                                html.Th("Top Lens Drift"),
+                            ]
+                        )
+                    ),
+                    html.Tbody(table_rows),
+                ],
+                bordered=True,
+                striped=True,
+                hover=True,
+                responsive=True,
+                size="sm",
+                class_name="mb-0",
+            ),
+        ]
+    )
+
+
 def _cluster_peer_movement_callout(
     all_group_rows: list[dict],
     selected_row: dict | None,
@@ -1020,7 +2315,7 @@ def _cluster_peer_movement_callout(
         return None
 
     selected_group_label = str(selected_row.get("group") or "Selected group")
-    selected_group_key = str(selected_row.get("group_key") or selected_group_label).strip().lower()
+    selected_group_key = _normalize_group_lookup_key(selected_row.get("group_key") or selected_group_label)
     selected_cluster_id = str(selected_row.get("cluster_id") or "").strip().lower()
     selected_cluster_label = str(selected_row.get("cluster_label") or "this cluster")
     if not selected_cluster_id:
@@ -1032,7 +2327,7 @@ def _cluster_peer_movement_callout(
     for temporal_row in temporal_rows:
         if not isinstance(temporal_row, dict):
             continue
-        temporal_group_key = str(temporal_row.get("group_key") or temporal_row.get("group") or "").strip().lower()
+        temporal_group_key = _normalize_group_lookup_key(temporal_row.get("group_key") or temporal_row.get("group"))
         if temporal_group_key:
             temporal_rows_by_key[temporal_group_key] = temporal_row
 
@@ -1050,7 +2345,7 @@ def _cluster_peer_movement_callout(
         if group_cluster_id != selected_cluster_id:
             continue
         cluster_group_count += 1
-        group_key = str(group_row.get("group_key") or group_row.get("group") or "").strip().lower()
+        group_key = _normalize_group_lookup_key(group_row.get("group_key") or group_row.get("group"))
         if not group_key:
             continue
         temporal_row = temporal_rows_by_key.get(group_key)
@@ -1336,7 +2631,7 @@ def load_news_group_latent_space(
     filtered_rows = _group_rows_for_cluster(rows, selected_cluster_value)
     group_options = _group_options(filtered_rows)
     selected_row = _selected_group_row(filtered_rows, selected_group_key, selected_cluster)
-    selected_value = str(selected_row.get("group_key")) if isinstance(selected_row, dict) else None
+    selected_value = _row_group_value(selected_row)
     bucket_granularity = (
         str(group_temporal.get("config", {}).get("bucket_granularity") or "week")
         if isinstance(group_temporal.get("config"), dict)
@@ -1381,6 +2676,12 @@ def load_news_group_latent_space(
         [
             status_alert,
             _cluster_filter_hint(rows, filtered_rows, selected_cluster),
+            _group_temporal_export_panel(
+                meta,
+                bucket_granularity,
+                group_type=effective_group_type,
+                group_key=selected_value,
+            ),
         ],
         className="d-grid gap-2",
     )
@@ -1396,7 +2697,20 @@ def load_news_group_latent_space(
         _centroid_figure(rows, selected_value, "mds1", "mds2", "MDS Group Centroids"),
         _group_movement_figure(temporal_row, bucket_granularity, movement_basis),
         _group_temporal_scope_summary(temporal_row, bucket_granularity, movement_basis, selected_cluster),
-        _group_movement_summary(temporal_row, bucket_granularity, movement_basis, selected_cluster),
+        html.Div(
+            [
+                _group_movement_summary(temporal_row, bucket_granularity, movement_basis, selected_cluster),
+                _movement_leaderboard(
+                    filtered_rows,
+                    group_temporal,
+                    effective_group_type,
+                    movement_basis,
+                    selected_value,
+                    selected_cluster,
+                ),
+            ],
+            className="d-grid gap-3",
+        ),
         _group_table(filtered_rows, selected_value, selected_cluster),
         html.Div(
             [

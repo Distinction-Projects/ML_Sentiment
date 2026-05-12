@@ -69,6 +69,9 @@ def register_news_endpoints(server) -> None:
             artifact=request.args.get("artifact"),
             export_format=request.args.get("format"),
             snapshot_date=request.args.get("snapshot_date"),
+            group_type=request.args.get("group_type"),
+            group_key=request.args.get("group_key"),
+            bucket_label=request.args.get("bucket_label"),
         )
         return _to_flask_response(response)
 

@@ -16,16 +16,16 @@ Use this file as persistent state for daily incremental agent runs.
 - Backlog source: `docs/BACKLOG.md`.
 
 ## Last Run
-- Date: 2026-05-08
-- Status: surfaced temporal coverage-gap ranges in the `/news/group-latent-space` movement summary card.
-- Changes: kept the temporal centroid calculations unchanged, reused `derived.group_temporal_latent_space.*.path_summary.coverage_gap_ranges` in the movement summary card so missing week ranges are visible outside the scope alert, and added focused page regressions for both the summary helper and the main callback output.
+- Date: 2026-05-12
+- Status: completed the remaining bucket-only temporal export coverage matrix for endpoint and parity surfaces.
+- Changes: added additive regressions in [`/Users/alexstevens/Documents/GitHub/NewsLens/tests/test_news_endpoints.py`](/Users/alexstevens/Documents/GitHub/NewsLens/tests/test_news_endpoints.py), [`/Users/alexstevens/Documents/GitHub/NewsLens/tests/test_fastapi_news_endpoints.py`](/Users/alexstevens/Documents/GitHub/NewsLens/tests/test_fastapi_news_endpoints.py), and [`/Users/alexstevens/Documents/GitHub/NewsLens/tests/test_news_api_parity.py`](/Users/alexstevens/Documents/GitHub/NewsLens/tests/test_news_api_parity.py) for the previously untested whole-bucket deep-link cells: current-mode `format=csv` and snapshot-mode `format=json` with `bucket_label=2026-04-06` and no selected group. The new checks confirm both Flask and FastAPI continue to return the full six-row weekly slice across `source`, `topic`, and `tag`, with the expected three sparse rows, and that the two API surfaces stay in parity for those combinations.
 - Validation:
-  - `.venv/bin/python -m unittest tests.test_news_group_latent_space.NewsGroupLatentSpaceTests.test_group_movement_summary_surfaces_coverage_gap_ranges tests.test_news_group_latent_space.NewsGroupLatentSpaceTests.test_load_news_group_latent_space_swaps_basis_specific_scope_counts_and_nearest_note -v`
-  - `.venv/bin/python -m py_compile src/pages/news_group_latent_space.py tests/test_news_group_latent_space.py`
+  - `.venv/bin/python -m py_compile tests/test_news_endpoints.py tests/test_fastapi_news_endpoints.py tests/test_news_api_parity.py`
+  - `.venv/bin/python -m unittest tests.test_news_endpoints.NewsEndpointTests.test_export_current_group_temporal_buckets_csv_supports_bucket_label_filters_without_group_key tests.test_news_endpoints.NewsEndpointTests.test_export_snapshot_group_temporal_buckets_supports_bucket_label_filters_without_group_key tests.test_fastapi_news_endpoints.FastApiNewsEndpointTests.test_export_current_group_temporal_buckets_csv_supports_bucket_label_filters_without_group_key tests.test_fastapi_news_endpoints.FastApiNewsEndpointTests.test_export_snapshot_group_temporal_buckets_supports_bucket_label_filters_without_group_key tests.test_news_api_parity.NewsApiParityTests.test_current_group_temporal_buckets_csv_supports_bucket_only_label_filter_parity tests.test_news_api_parity.NewsApiParityTests.test_snapshot_group_temporal_buckets_supports_bucket_only_label_filter_parity -v`
 
 ## Next Concrete Step
-- Thread the same `coverage_gap_ranges` copy into a lightweight temporal export/download artifact so missing intervals survive outside the in-app cards.
-- Keep it additive: reuse the existing derived field and avoid changing centroid calculations or chart structure.
+- Add one page-level smoke assertion in [`/Users/alexstevens/Documents/GitHub/NewsLens/tests/test_news_group_latent_space.py`](/Users/alexstevens/Documents/GitHub/NewsLens/tests/test_news_group_latent_space.py) proving `/news/group-latent-space` can emit or consume whole-bucket temporal deep links without requiring a selected group.
+- If that stays green, consider a small UI assertion around preserving `bucket_label` when toggling between popularity and latent-space views.
 
 ## Notes For Future Agents
 - Prefer additive `derived.*` backend fields for reusable analysis.

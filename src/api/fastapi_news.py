@@ -115,12 +115,18 @@ def register_fastapi_news_endpoints(
         artifact: str | None = Query(default=None),
         format: str | None = Query(default=None),
         snapshot_date: str | None = Query(default=None),
+        group_type: str | None = Query(default=None),
+        group_key: str | None = Query(default=None),
+        bucket_label: str | None = Query(default=None),
     ):
         response = controller.export_artifact(
             refresh=refresh,
             artifact=artifact,
             export_format=format,
             snapshot_date=snapshot_date,
+            group_type=group_type,
+            group_key=group_key,
+            bucket_label=bucket_label,
         )
         return _to_fastapi_response(response)
 

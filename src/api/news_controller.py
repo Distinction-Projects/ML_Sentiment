@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -217,6 +218,445 @@ def _source_differentiation_summary_rows(source_diff: dict[str, Any]) -> list[di
     ]
 
 
+def _movement_pattern_label(
+    total_movement: Any,
+    largest_jump: Any,
+    valid_bucket_count: Any,
+) -> tuple[str | None, float | None]:
+    if not isinstance(total_movement, (int, float)) or not isinstance(largest_jump, (int, float)):
+        return None, None
+
+    if float(total_movement) <= 0:
+        return "no measurable movement", None
+
+    jump_share = min(max(float(largest_jump) / float(total_movement), 0.0), 1.0)
+    if jump_share >= 0.75:
+        return "jump-led", jump_share
+    if int(valid_bucket_count or 0) >= 3 and jump_share <= 0.6:
+        return "steady drift", jump_share
+    return "mixed", jump_share
+
+
+def _group_temporal_pattern_fields(
+    path_summary: dict[str, Any],
+    *,
+    prefix: str = "",
+) -> dict[str, Any]:
+    pca_label, pca_jump_share = _movement_pattern_label(
+        path_summary.get("total_movement_pca"),
+        path_summary.get("largest_jump_pca"),
+        path_summary.get("valid_pca_bucket_count"),
+    )
+    mds_label, mds_jump_share = _movement_pattern_label(
+        path_summary.get("total_movement_mds"),
+        path_summary.get("largest_jump_mds"),
+        path_summary.get("valid_mds_bucket_count"),
+    )
+    return {
+        f"{prefix}movement_pattern_pca": pca_label,
+        f"{prefix}largest_jump_share_pca": pca_jump_share,
+        f"{prefix}movement_pattern_mds": mds_label,
+        f"{prefix}largest_jump_share_mds": mds_jump_share,
+    }
+
+
+def _group_temporal_popularity_fields(
+    popularity_summary: dict[str, Any],
+    *,
+    prefix: str = "",
+) -> dict[str, Any]:
+    return {
+        f"{prefix}popularity_peak_bucket": popularity_summary.get("peak_bucket"),
+        f"{prefix}popularity_peak_articles": popularity_summary.get("peak_articles"),
+        f"{prefix}popularity_first_share": popularity_summary.get("first_share"),
+        f"{prefix}popularity_latest_share": popularity_summary.get("latest_share"),
+        f"{prefix}popularity_share_delta": popularity_summary.get("share_delta"),
+        f"{prefix}popularity_recent_share_delta": popularity_summary.get("recent_share_delta"),
+        f"{prefix}popularity_first_share_rank_within_type": popularity_summary.get("first_share_rank"),
+        f"{prefix}popularity_latest_share_rank_within_type": popularity_summary.get("latest_share_rank"),
+        f"{prefix}popularity_rank_change_within_type": popularity_summary.get("rank_change"),
+    }
+
+
+def _share_delta_direction(value: Any) -> str | None:
+    if not isinstance(value, (int, float)):
+        return None
+    if abs(float(value)) < 0.0005:
+        return "flat"
+    return "rising" if float(value) > 0 else "falling"
+
+
+def _popularity_momentum_label(share_delta: Any, recent_share_delta: Any) -> str | None:
+    overall_direction = _share_delta_direction(share_delta)
+    recent_direction = _share_delta_direction(recent_share_delta)
+
+    if overall_direction == "rising":
+        if recent_direction == "rising":
+            return "rising now"
+        if recent_direction == "falling":
+            return "cooling after gains"
+        return "holding gains"
+    if overall_direction == "falling":
+        if recent_direction == "rising":
+            return "rebounding"
+        if recent_direction == "falling":
+            return "still falling"
+        return "holding losses"
+    if overall_direction == "flat":
+        if recent_direction == "rising":
+            return "rebounding to baseline"
+        if recent_direction == "falling":
+            return "slipping from baseline"
+        return "flat"
+    if recent_direction == "rising":
+        return "recently rising"
+    if recent_direction == "falling":
+        return "recently falling"
+    return recent_direction
+
+
+def _group_temporal_path_summary_rows(group_temporal: dict[str, Any]) -> list[dict[str, Any]]:
+    groups = group_temporal.get("groups") if isinstance(group_temporal.get("groups"), dict) else {}
+    config = group_temporal.get("config") if isinstance(group_temporal.get("config"), dict) else {}
+    rows: list[dict[str, Any]] = []
+
+    for group_type in ("source", "topic", "tag"):
+        temporal_rows = groups.get(group_type) if isinstance(groups.get(group_type), list) else []
+        for temporal_row in temporal_rows:
+            if not isinstance(temporal_row, dict):
+                continue
+
+            path_summary = (
+                temporal_row.get("path_summary")
+                if isinstance(temporal_row.get("path_summary"), dict)
+                else {}
+            )
+            popularity_summary = (
+                temporal_row.get("popularity_summary")
+                if isinstance(temporal_row.get("popularity_summary"), dict)
+                else {}
+            )
+            coverage_gap_ranges = (
+                path_summary.get("coverage_gap_ranges")
+                if isinstance(path_summary.get("coverage_gap_ranges"), list)
+                else []
+            )
+            coverage_gap_labels = [
+                str(gap.get("label") or "").strip()
+                for gap in coverage_gap_ranges
+                if isinstance(gap, dict) and str(gap.get("label") or "").strip()
+            ]
+            direction_pca = path_summary.get("direction_pca") if isinstance(path_summary.get("direction_pca"), dict) else {}
+            direction_mds = path_summary.get("direction_mds") if isinstance(path_summary.get("direction_mds"), dict) else {}
+
+            rows.append(
+                {
+                    "group_type": group_type,
+                    "group": temporal_row.get("group"),
+                    "group_key": temporal_row.get("group_key"),
+                    "status": temporal_row.get("status"),
+                    "reason": temporal_row.get("reason"),
+                    "bucket_granularity": config.get("bucket_granularity"),
+                    "min_articles_per_bucket": config.get("min_articles_per_bucket"),
+                    "min_buckets_per_group": config.get("min_buckets_per_group"),
+                    "n_articles": temporal_row.get("n_articles"),
+                    "n_buckets": temporal_row.get("n_buckets"),
+                    "date_start": temporal_row.get("date_start"),
+                    "date_end": temporal_row.get("date_end"),
+                    "bucket_count": path_summary.get("bucket_count"),
+                    "valid_pca_bucket_count": path_summary.get("valid_pca_bucket_count"),
+                    "valid_mds_bucket_count": path_summary.get("valid_mds_bucket_count"),
+                    "sparse_bucket_count": path_summary.get("sparse_bucket_count"),
+                    "coverage_gap_count": path_summary.get("coverage_gap_count"),
+                    "coverage_gap_labels": " | ".join(coverage_gap_labels),
+                    "coverage_gap_ranges_json": json.dumps(coverage_gap_ranges, sort_keys=True),
+                    "start_bucket": path_summary.get("start_bucket"),
+                    "end_bucket": path_summary.get("end_bucket"),
+                    "total_movement_pca": path_summary.get("total_movement_pca"),
+                    "largest_jump_pca": path_summary.get("largest_jump_pca"),
+                    "direction_pca_pc1_delta": direction_pca.get("pc1_delta"),
+                    "direction_pca_pc2_delta": direction_pca.get("pc2_delta"),
+                    "direction_pca_pc3_delta": direction_pca.get("pc3_delta"),
+                    "total_movement_mds": path_summary.get("total_movement_mds"),
+                    "largest_jump_mds": path_summary.get("largest_jump_mds"),
+                    "direction_mds_mds1_delta": direction_mds.get("mds1_delta"),
+                    "direction_mds_mds2_delta": direction_mds.get("mds2_delta"),
+                    "direction_mds_mds3_delta": direction_mds.get("mds3_delta"),
+                    **_group_temporal_pattern_fields(path_summary),
+                    **_group_temporal_popularity_fields(popularity_summary),
+                }
+            )
+
+    return rows
+
+
+def _rank_group_temporal_popularity_rows(
+    rows: list[dict[str, Any]],
+    *,
+    metric_field: str,
+    rank_field: str,
+) -> None:
+    grouped_rows: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        group_type = str(row.get("group_type") or "").strip().lower()
+        if not group_type:
+            continue
+        grouped_rows.setdefault(group_type, []).append(row)
+
+    for grouped in grouped_rows.values():
+        ranked = [
+            row
+            for row in grouped
+            if isinstance(row.get(metric_field), (int, float))
+        ]
+        ranked.sort(
+            key=lambda row: (
+                -float(row.get(metric_field) or 0.0),
+                -float(
+                    row.get("popularity_recent_share_delta")
+                    if isinstance(row.get("popularity_recent_share_delta"), (int, float))
+                    else -999.0
+                ),
+                -int(row.get("popularity_peak_articles") or 0),
+                -int(row.get("n_articles") or 0),
+                str(row.get("group") or "").lower(),
+            )
+        )
+        for index, row in enumerate(ranked, start=1):
+            row[rank_field] = index
+
+
+def _group_temporal_popularity_momentum_rows(group_temporal: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for path_row in _group_temporal_path_summary_rows(group_temporal):
+        share_delta = path_row.get("popularity_share_delta")
+        recent_share_delta = path_row.get("popularity_recent_share_delta")
+        if not isinstance(share_delta, (int, float)) and not isinstance(recent_share_delta, (int, float)):
+            continue
+        rows.append(
+            {
+                **path_row,
+                "popularity_share_direction": _share_delta_direction(share_delta),
+                "popularity_recent_share_direction": _share_delta_direction(recent_share_delta),
+                "popularity_momentum_label": _popularity_momentum_label(share_delta, recent_share_delta),
+                "popularity_first_share_rank_within_type": path_row.get("popularity_first_share_rank_within_type"),
+                "popularity_latest_share_rank_within_type": path_row.get("popularity_latest_share_rank_within_type"),
+                "popularity_rank_change_within_type": path_row.get("popularity_rank_change_within_type"),
+                "popularity_share_delta_rank_within_type": None,
+                "popularity_recent_share_delta_rank_within_type": None,
+            }
+        )
+
+    _rank_group_temporal_popularity_rows(
+        rows,
+        metric_field="popularity_share_delta",
+        rank_field="popularity_share_delta_rank_within_type",
+    )
+    _rank_group_temporal_popularity_rows(
+        rows,
+        metric_field="popularity_first_share",
+        rank_field="popularity_first_share_rank_within_type",
+    )
+    _rank_group_temporal_popularity_rows(
+        rows,
+        metric_field="popularity_latest_share",
+        rank_field="popularity_latest_share_rank_within_type",
+    )
+    _rank_group_temporal_popularity_rows(
+        rows,
+        metric_field="popularity_recent_share_delta",
+        rank_field="popularity_recent_share_delta_rank_within_type",
+    )
+    for row in rows:
+        first_rank = row.get("popularity_first_share_rank_within_type")
+        latest_rank = row.get("popularity_latest_share_rank_within_type")
+        if isinstance(first_rank, int) and isinstance(latest_rank, int):
+            row["popularity_rank_change_within_type"] = int(first_rank) - int(latest_rank)
+    rows.sort(
+        key=lambda row: (
+            str(row.get("group_type") or ""),
+            int(row.get("popularity_share_delta_rank_within_type") or 999999),
+            int(row.get("popularity_recent_share_delta_rank_within_type") or 999999),
+            str(row.get("group") or "").lower(),
+        )
+    )
+    return rows
+
+
+def _group_temporal_bucket_rows(group_temporal: dict[str, Any]) -> list[dict[str, Any]]:
+    groups = group_temporal.get("groups") if isinstance(group_temporal.get("groups"), dict) else {}
+    config = group_temporal.get("config") if isinstance(group_temporal.get("config"), dict) else {}
+    rows: list[dict[str, Any]] = []
+
+    for group_type in ("source", "topic", "tag"):
+        temporal_rows = groups.get(group_type) if isinstance(groups.get(group_type), list) else []
+        for temporal_row in temporal_rows:
+            if not isinstance(temporal_row, dict):
+                continue
+
+            path_summary = (
+                temporal_row.get("path_summary")
+                if isinstance(temporal_row.get("path_summary"), dict)
+                else {}
+            )
+            popularity_summary = (
+                temporal_row.get("popularity_summary")
+                if isinstance(temporal_row.get("popularity_summary"), dict)
+                else {}
+            )
+            coverage_gap_ranges = (
+                path_summary.get("coverage_gap_ranges")
+                if isinstance(path_summary.get("coverage_gap_ranges"), list)
+                else []
+            )
+            coverage_gap_labels = [
+                str(gap.get("label") or "").strip()
+                for gap in coverage_gap_ranges
+                if isinstance(gap, dict) and str(gap.get("label") or "").strip()
+            ]
+            bucket_rows = temporal_row.get("buckets") if isinstance(temporal_row.get("buckets"), list) else []
+
+            for bucket_row in bucket_rows:
+                if not isinstance(bucket_row, dict):
+                    continue
+
+                source_counts = (
+                    bucket_row.get("source_counts")
+                    if isinstance(bucket_row.get("source_counts"), dict)
+                    else {}
+                )
+                top_lens_deviations = (
+                    bucket_row.get("top_lens_deviations")
+                    if isinstance(bucket_row.get("top_lens_deviations"), list)
+                    else []
+                )
+                top_lens_labels = [
+                    str(row.get("lens") or "").strip()
+                    for row in top_lens_deviations
+                    if isinstance(row, dict) and str(row.get("lens") or "").strip()
+                ]
+
+                rows.append(
+                    {
+                        "group_type": group_type,
+                        "group": temporal_row.get("group"),
+                        "group_key": temporal_row.get("group_key"),
+                        "group_status": temporal_row.get("status"),
+                        "group_reason": temporal_row.get("reason"),
+                        "bucket_granularity": config.get("bucket_granularity"),
+                        "min_articles_per_bucket": config.get("min_articles_per_bucket"),
+                        "min_buckets_per_group": config.get("min_buckets_per_group"),
+                        "group_n_articles": temporal_row.get("n_articles"),
+                        "group_n_buckets": temporal_row.get("n_buckets"),
+                        "group_date_start": temporal_row.get("date_start"),
+                        "group_date_end": temporal_row.get("date_end"),
+                        "group_valid_pca_bucket_count": path_summary.get("valid_pca_bucket_count"),
+                        "group_valid_mds_bucket_count": path_summary.get("valid_mds_bucket_count"),
+                        "group_sparse_bucket_count": path_summary.get("sparse_bucket_count"),
+                        "group_coverage_gap_count": path_summary.get("coverage_gap_count"),
+                        "group_coverage_gap_labels": " | ".join(coverage_gap_labels),
+                        "group_coverage_gap_ranges_json": json.dumps(coverage_gap_ranges, sort_keys=True),
+                        "bucket_start": bucket_row.get("bucket_start"),
+                        "bucket_end": bucket_row.get("bucket_end"),
+                        "bucket_label": bucket_row.get("bucket_label"),
+                        "bucket_status": bucket_row.get("status"),
+                        "bucket_n_articles": bucket_row.get("n_articles"),
+                        "bucket_n_sources": bucket_row.get("n_sources"),
+                        "bucket_corpus_share": bucket_row.get("corpus_share"),
+                        "bucket_pc1": bucket_row.get("pc1"),
+                        "bucket_pc2": bucket_row.get("pc2"),
+                        "bucket_pc3": bucket_row.get("pc3"),
+                        "bucket_mds1": bucket_row.get("mds1"),
+                        "bucket_mds2": bucket_row.get("mds2"),
+                        "bucket_mds3": bucket_row.get("mds3"),
+                        "bucket_dispersion_pca": bucket_row.get("dispersion_pca"),
+                        "bucket_dispersion_mds": bucket_row.get("dispersion_mds"),
+                        "bucket_source_counts_json": json.dumps(source_counts, sort_keys=True),
+                        "bucket_top_lens_labels": " | ".join(top_lens_labels),
+                        "bucket_top_lens_deviations_json": json.dumps(top_lens_deviations, sort_keys=True),
+                        **_group_temporal_pattern_fields(path_summary, prefix="group_"),
+                        **_group_temporal_popularity_fields(popularity_summary, prefix="group_"),
+                    }
+                )
+
+    return rows
+
+
+def _normalize_group_temporal_bucket_filters(
+    artifact: str,
+    group_type: str | None,
+    group_key: str | None,
+    bucket_label: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    normalized_group_type = str(group_type or "").strip().lower() or None
+    normalized_group_key = str(group_key or "").strip() or None
+    normalized_bucket_label = str(bucket_label or "").strip() or None
+
+    if normalized_group_type is None and normalized_group_key is None and normalized_bucket_label is None:
+        return None, None, None
+
+    if (
+        normalized_group_type is not None or normalized_group_key is not None
+    ) and artifact not in {"group_temporal_buckets", "group_temporal_path_summary", "group_temporal_popularity_momentum"}:
+        raise ValueError(
+            "group_type and group_key are only supported for artifact=group_temporal_buckets, artifact=group_temporal_path_summary, or artifact=group_temporal_popularity_momentum"
+        )
+
+    if normalized_bucket_label is not None and artifact != "group_temporal_buckets":
+        raise ValueError("bucket_label is only supported for artifact=group_temporal_buckets")
+
+    if normalized_group_key and not normalized_group_type:
+        raise ValueError("group_key requires group_type")
+
+    if normalized_group_type is not None and normalized_group_type not in {"source", "topic", "tag"}:
+        raise ValueError("group_type must be one of ['source', 'tag', 'topic']")
+
+    return normalized_group_type, normalized_group_key, normalized_bucket_label
+
+
+def _canonicalize_group_filter_key(value: str | None) -> str:
+    normalized = str(value or "").strip().lower().replace("-", " ").replace("_", " ")
+    return " ".join(normalized.split())
+
+
+def _filter_group_temporal_bucket_rows(
+    rows: list[dict[str, Any]],
+    *,
+    group_type: str | None,
+    group_key: str | None,
+    bucket_label: str | None = None,
+) -> list[dict[str, Any]]:
+    normalized_group_type = str(group_type or "").strip().lower()
+    normalized_group_key = _canonicalize_group_filter_key(group_key)
+    normalized_bucket_label = str(bucket_label or "").strip()
+    if not normalized_group_type:
+        if not normalized_bucket_label:
+            return rows
+        return [
+            row
+            for row in rows
+            if isinstance(row, dict) and str(row.get("bucket_label") or "").strip() == normalized_bucket_label
+        ]
+
+    filtered_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_group_type = str(row.get("group_type") or "").strip().lower()
+        if row_group_type != normalized_group_type:
+            continue
+        if normalized_group_key:
+            row_group_key = _canonicalize_group_filter_key(str(row.get("group_key") or row.get("group") or ""))
+            if row_group_key != normalized_group_key:
+                continue
+        if normalized_bucket_label and str(row.get("bucket_label") or "").strip() != normalized_bucket_label:
+            continue
+        filtered_rows.append(row)
+    return filtered_rows
+
+
 def _export_rows_for_artifact(payload: dict[str, Any], artifact: str) -> list[dict[str, Any]]:
     stats_obj = _stats_obj_from_payload(payload)
     chart_aggregates = stats_obj.get("chart_aggregates") if isinstance(stats_obj.get("chart_aggregates"), dict) else {}
@@ -236,6 +676,27 @@ def _export_rows_for_artifact(payload: dict[str, Any], artifact: str) -> list[di
     if artifact == "source_differentiation_summary":
         source_diff = stats_obj.get("source_differentiation") if isinstance(stats_obj.get("source_differentiation"), dict) else {}
         return _source_differentiation_summary_rows(source_diff)
+    if artifact == "group_temporal_path_summary":
+        group_temporal = (
+            stats_obj.get("group_temporal_latent_space")
+            if isinstance(stats_obj.get("group_temporal_latent_space"), dict)
+            else {}
+        )
+        return _group_temporal_path_summary_rows(group_temporal)
+    if artifact == "group_temporal_popularity_momentum":
+        group_temporal = (
+            stats_obj.get("group_temporal_latent_space")
+            if isinstance(stats_obj.get("group_temporal_latent_space"), dict)
+            else {}
+        )
+        return _group_temporal_popularity_momentum_rows(group_temporal)
+    if artifact == "group_temporal_buckets":
+        group_temporal = (
+            stats_obj.get("group_temporal_latent_space")
+            if isinstance(stats_obj.get("group_temporal_latent_space"), dict)
+            else {}
+        )
+        return _group_temporal_bucket_rows(group_temporal)
     if artifact == "event_clusters":
         event_control = stats_obj.get("event_control") if isinstance(stats_obj.get("event_control"), dict) else {}
         events = event_control.get("events") if isinstance(event_control.get("events"), list) else []
@@ -529,6 +990,9 @@ class NewsController:
         artifact: str | None,
         export_format: str | None,
         snapshot_date: str | None,
+        group_type: str | None = None,
+        group_key: str | None = None,
+        bucket_label: str | None = None,
     ) -> ControllerResponse:
         force_refresh = _parse_refresh(refresh)
         snapshot_date_value: str | None = None
@@ -540,6 +1004,9 @@ class NewsController:
             "event_control_summary",
             "event_source_coverage",
             "event_source_pair_coverage",
+            "group_temporal_buckets",
+            "group_temporal_popularity_momentum",
+            "group_temporal_path_summary",
             "source_tag_matrix",
             "source_score_status",
             "lens_pair_metrics",
@@ -563,6 +1030,12 @@ class NewsController:
             return _response_json(400, {"status": "bad_request", "error": "format must be csv or json"})
 
         try:
+            normalized_group_type, normalized_group_key, normalized_bucket_label = _normalize_group_temporal_bucket_filters(
+                artifact_value,
+                group_type,
+                group_key,
+                bucket_label,
+            )
             snapshot_date_value = parse_snapshot_date(snapshot_date)
             if snapshot_date_value is None and stats_backend_mode() == "precomputed":
                 payload = load_precomputed_stats_response()
@@ -584,7 +1057,21 @@ class NewsController:
             return _response_json(503, {"status": "upstream_error", "error": f"{type(exc).__name__}: {exc}"})
 
         rows = _export_rows_for_artifact(payload, artifact_value)
+        rows = _filter_group_temporal_bucket_rows(
+            rows,
+            group_type=normalized_group_type,
+            group_key=normalized_group_key,
+            bucket_label=normalized_bucket_label,
+        )
         meta = _export_meta_from_payload(payload, filtered_count=len(rows), returned_count=len(rows))
+        filters = None
+        if normalized_group_type or normalized_bucket_label:
+            filters = {}
+            if normalized_group_type:
+                filters["group_type"] = normalized_group_type
+                filters["group_key"] = normalized_group_key
+            if normalized_bucket_label:
+                filters["bucket_label"] = normalized_bucket_label
 
         if export_format_value == "json":
             return _response_json(
@@ -594,6 +1081,7 @@ class NewsController:
                     "artifact": artifact_value,
                     "format": "json",
                     "meta": meta,
+                    "filters": filters,
                     "rows": rows,
                 },
                 headers=_read_cache_headers(force_refresh=force_refresh, snapshot_date=snapshot_date_value),
