@@ -43,6 +43,11 @@ class NewsPageRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.content_type)
 
+    def test_news_source_influence_page_route(self):
+        response = self.client.get("/news/source-influence")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/html", response.content_type)
+
     def test_news_lenses_page_route(self):
         response = self.client.get("/news/lenses")
         self.assertEqual(response.status_code, 200)

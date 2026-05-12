@@ -16,6 +16,7 @@ import { render as renderScraped } from "./scraped";
 import { render as renderSnapshotCompare } from "./snapshot-compare";
 import { render as renderSourceDifferentiation } from "./source-differentiation";
 import { render as renderSourceEffects } from "./source-effects";
+import { render as renderSourceInfluence } from "./source-influence";
 import { render as renderSourceTagMatrix } from "./source-tag-matrix";
 import { render as renderSources } from "./sources";
 import { render as renderStats } from "./stats";
@@ -42,6 +43,7 @@ const RENDERERS = {
   "snapshot-compare": renderSnapshotCompare,
   "source-differentiation": renderSourceDifferentiation,
   "source-effects": renderSourceEffects,
+  "source-influence": renderSourceInfluence,
   "source-tag-matrix": renderSourceTagMatrix,
   sources: renderSources,
   stats: renderStats,
